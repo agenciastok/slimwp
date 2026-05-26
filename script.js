@@ -209,11 +209,64 @@ function destroyVideoJs() {
   }
 }
 
+/**
+ * Tag <video> pura no DOM — mpegts.js exige HTMLVideoElement com .play().
+ * Sempre busca no DOM (Video.js pode mover o id para um wrapper).
+ */
+function getChannelsNativeVideoElement() {
+  const screen = document.getElementById("channels-player-screen");
+  if (screen) {
+    const byId = screen.querySelector("video#channels-video");
+    if (byId?.tagName === "VIDEO" && typeof byId.play === "function") return byId;
+    const anyVideo = screen.querySelector("video");
+    if (anyVideo?.tagName === "VIDEO" && typeof anyVideo.play === "function") return anyVideo;
+  }
+
+  const root = document.getElementById("channels-video");
+  if (root?.tagName === "VIDEO" && typeof root.play === "function") return root;
+  if (root?.querySelector) {
+    const nested = root.querySelector("video");
+    if (nested?.tagName === "VIDEO" && typeof nested.play === "function") return nested;
+  }
+
+  if (channelsVideo?.tagName === "VIDEO" && typeof channelsVideo.play === "function") {
+    return channelsVideo;
+  }
+
+  return null;
+}
+
+/** Destrói Video.js e deixa o <video> nativo pronto para mpegts.js. */
+function prepareChannelsVideoForMpegts() {
+  destroyVideoJs();
+
+  const native = getChannelsNativeVideoElement();
+  if (!native) return null;
+
+  native.classList.remove("vjs-tech", "vjs-hidden", "video-js", "vjs-default-skin");
+  native.classList.add("channels-player__video");
+  if (!native.id) native.id = "channels-video";
+
+  native.playsInline = true;
+  native.setAttribute("playsinline", "");
+  native.setAttribute("webkit-playsinline", "");
+  native.setAttribute("crossorigin", "anonymous");
+  native.crossOrigin = "anonymous";
+  native.preload = "auto";
+  native.style.transform = "translateZ(0)";
+  native.style.backfaceVisibility = "hidden";
+
+  return native;
+}
+
 /** Elemento <video> real (Video.js envelopa o nó original). */
 function resolveNativeVideoElement(videoEl) {
   if (!videoEl) return null;
 
-  if (videoEl === channelsVideo) {
+  if (videoEl === channelsVideo || videoEl?.id === "channels-video") {
+    const fromDom = getChannelsNativeVideoElement();
+    if (fromDom) return fromDom;
+
     const player = getActiveChannelsVideoJsPlayer();
     if (player && typeof player.tech === "function") {
       try {
@@ -223,9 +276,6 @@ function resolveNativeVideoElement(videoEl) {
         /* ignore */
       }
     }
-    if (typeof channelsVideo.pause === "function") return channelsVideo;
-    const nested = channelsVideo.querySelector?.("video");
-    if (nested && typeof nested.pause === "function") return nested;
     return null;
   }
 
@@ -421,13 +471,7 @@ function playLiveChannel(entry, playbackToken) {
   });
 
   if (!isLiveHlsUrl(streamUrl) && typeof mpegts !== "undefined" && mpegts.isSupported()) {
-    const ok = startMpegtsPlayback(
-      channelsVideo,
-      streamUrl,
-      entry,
-      channelsNowTitle,
-      playbackToken
-    );
+    const ok = startMpegtsPlayback(null, streamUrl, entry, channelsNowTitle, playbackToken);
     if (ok) return;
   }
 
@@ -480,8 +524,8 @@ function playLiveChannel(entry, playbackToken) {
 }
 
 function playLiveChannelNative(entry, streamUrl, playbackToken) {
-  const native = resolveNativeVideoElement(channelsVideo) || channelsVideo;
-  if (!native) return;
+  const native = prepareChannelsVideoForMpegts() || getChannelsNativeVideoElement();
+  if (!native || typeof native.play !== "function") return;
 
   native.setAttribute("crossorigin", "anonymous");
   native.setAttribute("src", streamUrl);
@@ -506,8 +550,8 @@ function playLiveChannelNative(entry, streamUrl, playbackToken) {
 }
 
 function getVideoJsTechVideo(fallbackEl) {
-  if (fallbackEl === channelsVideo) {
-    return resolveNativeVideoElement(channelsVideo) || fallbackEl;
+  if (fallbackEl === channelsVideo || fallbackEl?.id === "channels-video") {
+    return getChannelsNativeVideoElement() || resolveNativeVideoElement(fallbackEl) || fallbackEl;
   }
   return resolveNativeVideoElement(fallbackEl) || fallbackEl;
 }
@@ -566,6 +610,17 @@ function applyChannelSafePlaybackOffset(videoEl) {
 function scheduleMpegtsDelayedPlay(playerInstancia, videoEl, entry, titleEl, playbackToken) {
   clearChannelPlayDelay();
 
+  const nativeVideo =
+    videoEl?.tagName === "VIDEO" && typeof videoEl.play === "function"
+      ? videoEl
+      : getChannelsNativeVideoElement();
+
+  if (!nativeVideo || typeof nativeVideo.play !== "function") {
+    console.error("[Slimflix] MPEG-TS: elemento <video> nativo inválido em beginPlayback/waitForBuffer");
+    showLiveChannelUnavailable(titleEl, entry);
+    return;
+  }
+
   if (titleEl) {
     titleEl.textContent = "Preparando buffer…";
   }
@@ -575,39 +630,49 @@ function scheduleMpegtsDelayedPlay(playerInstancia, videoEl, entry, titleEl, pla
   } catch {
     /* ignore */
   }
-  safePauseVideoElement(videoEl);
+  try {
+    nativeVideo.pause();
+  } catch {
+    /* ignore */
+  }
 
   const startedAt = Date.now();
 
   const beginPlayback = () => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-    applyChannelSafePlaybackOffset(videoEl);
+    applyChannelSafePlaybackOffset(nativeVideo);
 
     try {
       playerInstancia.play();
     } catch (err) {
-      console.warn("[Slimflix MPEG-TS] Falha ao iniciar após buffer:", err);
+      console.warn("[Slimflix MPEG-TS] Falha ao iniciar playerInstancia.play():", err);
     }
-    safePlayVideoElement(videoEl);
+
+    try {
+      const playPromise = nativeVideo.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {});
+      }
+    } catch (err) {
+      console.warn("[Slimflix MPEG-TS] Falha em nativeVideo.play():", err);
+    }
 
     if (titleEl && entry) {
       titleEl.textContent = entry.name || entry.label || "Canal";
     }
 
-    if (videoEl === channelsVideo) {
-      startChannelStallWatcher(videoEl, playbackToken);
-    }
+    startChannelStallWatcher(nativeVideo, playbackToken);
   };
 
   const waitForBuffer = () => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
     let bufferedAhead = 0;
-    if (videoEl.buffered && videoEl.buffered.length > 0) {
-      const end = videoEl.buffered.end(videoEl.buffered.length - 1);
-      const start = videoEl.buffered.start(0);
-      bufferedAhead = end - Math.max(videoEl.currentTime, start);
+    if (nativeVideo.buffered && nativeVideo.buffered.length > 0) {
+      const end = nativeVideo.buffered.end(nativeVideo.buffered.length - 1);
+      const start = nativeVideo.buffered.start(0);
+      bufferedAhead = end - Math.max(nativeVideo.currentTime, start);
     }
 
     const elapsed = Date.now() - startedAt;
@@ -829,13 +894,19 @@ function logHlsError(url, entry, data) {
   });
 }
 
-function startMpegtsPlayback(videoEl, url, entry, titleEl, playbackToken) {
-  if (!videoEl || typeof mpegts === "undefined" || !mpegts.isSupported()) return false;
+function startMpegtsPlayback(_videoEl, url, entry, titleEl, playbackToken) {
+  if (typeof mpegts === "undefined" || !mpegts.isSupported()) return false;
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return false;
 
   destroyHls();
   destroyMpegts();
-  prepareChannelsVideoElement();
+
+  const nativeVideo = prepareChannelsVideoForMpegts();
+  if (!nativeVideo) {
+    console.error("[Slimflix] MPEG-TS: #channels-video <video> nativo não encontrado no DOM");
+    showLiveChannelUnavailable(titleEl, entry);
+    return false;
+  }
 
   let playerInstancia = null;
   try {
@@ -861,25 +932,29 @@ function startMpegtsPlayback(videoEl, url, entry, titleEl, playbackToken) {
 
   playerInstancia.on(mpegts.Events.ERROR, (_type, detail) => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    safePauseVideoElement(videoEl);
+    try {
+      nativeVideo.pause();
+    } catch {
+      /* ignore */
+    }
     showLiveChannelUnavailable(titleEl, entry, { url, detail });
   });
 
   if (mpegts.Events.LOADING_COMPLETE) {
     playerInstancia.on(mpegts.Events.LOADING_COMPLETE, () => {
       if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-      if (videoEl.paused) applyChannelSafePlaybackOffset(videoEl);
+      if (nativeVideo.paused) applyChannelSafePlaybackOffset(nativeVideo);
     });
   }
 
   try {
-    playerInstancia.attachMediaElement(videoEl);
+    playerInstancia.attachMediaElement(nativeVideo);
     playerInstancia.load();
     if (playbackToken != null && playbackToken !== channelPlaybackToken) {
       destroyMpegts();
       return false;
     }
-    scheduleMpegtsDelayedPlay(playerInstancia, videoEl, entry, titleEl, playbackToken);
+    scheduleMpegtsDelayedPlay(playerInstancia, nativeVideo, entry, titleEl, playbackToken);
     return true;
   } catch (err) {
     console.error("[Slimflix MPEG-TS] Falha ao iniciar:", err);
