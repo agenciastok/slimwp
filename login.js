@@ -178,11 +178,11 @@
    * Encapsula URL do painel IPTV no proxy (API, movie, series, VOD).
    * Canais /live/ ficam com URL direta no player.
    */
-  function wrapUrlForProxy(targetUrl) {
+  function wrapUrlForProxy(targetUrl, options = {}) {
     if (!targetUrl || typeof targetUrl !== "string") return targetUrl;
     const trimmed = targetUrl.trim();
     if (trimmed.startsWith("/api/proxy")) return trimmed;
-    if (isXtreamLiveStreamUrl(trimmed)) return trimmed;
+    if (!options.force && isXtreamLiveStreamUrl(trimmed)) return trimmed;
     try {
       const parsed = new URL(trimmed, window.location.origin);
       if (!["http:", "https:"].includes(parsed.protocol)) return targetUrl;
