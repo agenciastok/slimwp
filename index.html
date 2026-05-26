@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+
+<html lang="pt-BR" class="h-full">
+
+<head>
+
+  <meta charset="UTF-8" />
+
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>SlimFlix — Webplayer</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <script>
+
+    tailwind.config = {
+
+      theme: {
+
+        extend: {
+
+          fontFamily: { sans: ["Outfit", "system-ui", "sans-serif"] },
+
+          colors: {
+
+            netflix: { DEFAULT: "#E50914", dark: "#B20710" },
+
+          },
+
+        },
+
+      },
+
+    };
+
+  </script>
+
+  <link rel="stylesheet" href="styles.css" />
+
+  <script>
+    (function () {
+      try {
+        var ok = false;
+        var raw = localStorage.getItem("slimflix_session");
+        if (raw) {
+          var s = JSON.parse(raw);
+          ok = !!(s && s.username && s.password);
+        }
+        if (!ok) {
+          var user = localStorage.getItem("slimflix_user");
+          var pass =
+            localStorage.getItem("slimflix_xtream_password") ||
+            localStorage.getItem("slimflix_password");
+          ok = !!(user && pass);
+        }
+        if (!ok && localStorage.getItem("slimflix_xtream_auth") === "1") {
+          ok = !!(
+            localStorage.getItem("slimflix_xtream_username") &&
+            localStorage.getItem("slimflix_xtream_password")
+          );
+        }
+        if (!ok) document.documentElement.classList.add("slimflix-locked");
+      } catch (e) {
+        document.documentElement.classList.add("slimflix-locked");
+      }
+    })();
+  </script>
+
+</head>
+
+<body class="login-active min-h-full font-sans antialiased">
+
+  <div class="film-grain" aria-hidden="true"></div>
+
+  <!-- ═══ Tela de Login ═══ -->
+
+  <div
+
+    id="login-screen"
+
+    class="auth-screen fixed inset-0 z-[200] flex min-h-screen flex-col items-center justify-center overflow-y-auto px-4 py-10"
+
+    role="dialog"
+
+    aria-labelledby="login-title"
+
+  >
+
+    <div class="aurora-glow pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
+      <div class="aurora-glow__orb aurora-glow__orb--tr" aria-hidden="true"></div>
+      <div class="aurora-glow__orb aurora-glow__orb--bl" aria-hidden="true"></div>
+    </div>
+
+
+
+    <div
+
+      class="auth-card relative z-10 w-full max-w-md rounded-3xl border border-gray-800 p-8 shadow-2xl backdrop-blur-md sm:p-10"
+
+    >
+
+      <header class="mb-8 text-center">
+
+        <h1
+
+          id="login-title"
+
+          class="text-4xl font-extrabold tracking-tight sm:text-5xl"
+
+        >
+
+          <span class="bg-gradient-to-r from-white via-gray-300 to-gray-400 bg-clip-text text-transparent">SLIM</span><span class="bg-gradient-to-r from-red-500 to-red-700 bg-clip-text text-transparent">FLIX</span>
+
+        </h1>
+
+        <p class="mt-2 text-sm text-white/80">Webplayer · Xtream Codes API</p>
+
+      </header>
+
+
+
+      <form id="login-form" class="space-y-5" novalidate>
+
+        <div>
+
+          <label for="xtream-user" class="mb-1.5 block text-xs font-medium uppercase tracking-wider text-white/85">
+
+            Usuário
+
+          </label>
+
+          <input
+
+            type="text"
+
+            id="xtream-user"
+
+            name="username"
+
+            class="auth-input w-full rounded-xl border border-gray-800 px-4 py-3 text-sm text-white placeholder-white/50 outline-none transition focus:border-red-600 focus:ring-2 focus:ring-red-600/25"
+
+            placeholder="Seu usuário"
+
+            autocomplete="username"
+
+            required
+
+          />
+
+        </div>
+
+
+
+        <div>
+
+          <label for="xtream-password" class="mb-1.5 block text-xs font-medium uppercase tracking-wider text-white/85">
+
+            Senha
+
+          </label>
+
+          <div class="relative">
+
+            <input
+
+              type="password"
+
+              id="xtream-password"
+
+              name="password"
+
+              class="auth-input w-full rounded-xl border border-gray-800 py-3 pl-4 pr-11 text-sm text-white placeholder-white/50 outline-none transition focus:border-red-600 focus:ring-2 focus:ring-red-600/25"
+
+              placeholder="••••••••"
+
+              autocomplete="current-password"
+
+              required
+
+            />
+
+            <button
+
+              type="button"
+
+              id="toggle-password"
+
+              class="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1 text-white/70 transition hover:text-red-500"
+
+              aria-label="Mostrar senha"
+
+              aria-pressed="false"
+
+            >
+
+              <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+
+                <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1 1 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
+
+                <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+
+              </svg>
+
+            </button>
+
+          </div>
+
+        </div>
+
+
+
+        <p id="login-error" class="hidden text-center text-sm text-rose-400" role="alert"></p>
+
+
+
+        <button
+
+          type="submit"
+
+          class="auth-btn-primary group relative w-full overflow-hidden rounded-xl bg-gradient-to-r from-red-600 to-red-800 px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-red-900/40 transition hover:from-red-700 hover:to-red-900 hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-red-600 focus:ring-offset-2 focus:ring-offset-[#121212] disabled:opacity-60"
+
+        >
+
+          <span class="relative z-10">Entrar</span>
+
+          <span class="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition group-hover:translate-x-full duration-700" aria-hidden="true"></span>
+
+        </button>
+
+      </form>
+
+
+
+      <div class="mt-8 text-center">
+
+        <button
+
+          type="button"
+
+          id="dev-bypass-btn"
+
+          class="text-sm text-white/75 transition hover:text-white opacity-70 hover:opacity-100"
+
+        >
+
+          🛠️ Entrar como Desenvolvedor (Bypass)
+
+        </button>
+
+      </div>
+
+    </div>
+
+
+
+    <p class="relative z-10 mt-8 text-center text-xs text-white/60">
+
+      &copy; 2026 SlimFlix · Acesso seguro via Xtream API
+
+    </p>
+
+  </div>
+
+
+
+  <!-- ═══ Tela de carregamento (Login → Player) ═══ -->
+
+  <div
+    id="loading-screen"
+    class="auth-screen hidden fixed inset-0 z-[210] flex flex-col items-center justify-center px-4 transition-opacity duration-300"
+    hidden
+    aria-hidden="true"
+    aria-live="polite"
+    aria-busy="true"
+    aria-label="Carregando catálogo"
+  >
+    <div class="aurora-glow pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
+      <div class="aurora-glow__orb aurora-glow__orb--tr" aria-hidden="true"></div>
+      <div class="aurora-glow__orb aurora-glow__orb--bl" aria-hidden="true"></div>
+    </div>
+    <div class="relative z-10 flex flex-col items-center text-center">
+      <h1 class="animate-pulse text-4xl font-extrabold tracking-tight sm:text-5xl" aria-hidden="true">
+        <span class="bg-gradient-to-r from-white via-gray-300 to-gray-400 bg-clip-text text-transparent">SLIM</span><span class="bg-gradient-to-r from-red-500 to-red-700 bg-clip-text text-transparent">FLIX</span>
+      </h1>
+      <div class="auth-spinner mt-10" role="status" aria-label="Carregando"></div>
+      <p id="loading-screen-text" class="mt-6 text-sm text-white/80">
+        Carregando seu catálogo premium...
+      </p>
+    </div>
+  </div>
+
+
+
+  <!-- ═══ Webplayer (SPA) ═══ -->
+
+  <div id="player-screen" class="hidden" hidden aria-hidden="true">
+
+  <div class="aurora-glow" aria-hidden="true">
+    <div class="aurora-glow__orb aurora-glow__orb--tr" aria-hidden="true"></div>
+    <div class="aurora-glow__orb aurora-glow__orb--bl" aria-hidden="true"></div>
+  </div>
+
+  <header class="navbar fixed top-0 left-0 z-50 w-full border-b border-white/5 bg-black/50 backdrop-blur-lg" id="navbar">
+
+    <div class="navbar__left">
+
+      <a href="#" class="logo" aria-label="SLIM FLIX Home">
+
+        <span class="logo__slim">SLIM</span><span class="logo__flix"> FLIX</span>
+
+      </a>
+
+      <nav class="nav-links" id="main-nav">
+
+        <a href="#" data-tab="home" class="nav-tab active">Início</a>
+
+        <a href="#" data-tab="channels" class="nav-tab">Canais</a>
+
+        <a href="#" data-tab="series" class="nav-tab">Séries</a>
+
+        <a href="#" data-tab="movies" class="nav-tab">Filmes</a>
+
+      </nav>
+
+    </div>
+
+    <div class="navbar__right">
+
+      <div class="search-box">
+
+        <input
+
+          type="search"
+
+          id="search-input"
+
+          class="search-box__input"
+
+          placeholder="Buscar títulos…"
+
+          autocomplete="off"
+
+          aria-label="Buscar conteúdo"
+
+        />
+
+        <button type="button" id="search-btn" class="search-box__btn" aria-label="Buscar">
+
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C8.01 14 6 11.99 6 9.5S8.01 5 10.5 5 15 7.01 15 9.5 12.99 14 10.5 14z"/></svg>
+
+        </button>
+
+      </div>
+
+      <button type="button" id="btn-logout" class="navbar__logout" title="Sair da conta" aria-label="Sair">
+
+        <svg class="navbar__logout-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+
+          <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15M12 9l-3 3m0 0l3 3m-3-3h12.75" />
+
+        </svg>
+
+        <span class="navbar__logout-label">Sair</span>
+
+      </button>
+
+    </div>
+
+  </header>
+
+  <div
+    id="player-api-alert"
+    class="player-api-alert hidden"
+    role="alert"
+    aria-live="polite"
+  >
+    <p id="player-api-alert-text" class="player-api-alert__text"></p>
+    <button type="button" id="player-api-alert-close" class="player-api-alert__close" aria-label="Fechar aviso">
+      &times;
+    </button>
+  </div>
+
+  <div class="page-shell" id="page-shell">
+
+    <aside id="pastas-sidebar" class="sidebar" hidden aria-label="Pastas por categoria">
+
+      <div class="sidebar__head">
+
+        <h2 class="sidebar__title">Pastas</h2>
+
+        <p class="sidebar__hint"> </p>
+
+      </div>
+
+      <nav id="sidebar-nav" class="sidebar__nav"></nav>
+
+    </aside>
+
+
+
+    <div class="page-main" id="page-main">
+
+  <section id="channels-view" class="channels-view" hidden aria-label="Guia de canais ao vivo">
+
+    <aside class="channels-col channels-col--folders" aria-label="Pastas de canais">
+
+      <div class="channels-col__head">
+
+        <h2 class="channels-col__title">Pastas</h2>
+
+      </div>
+
+      <nav id="channels-folders" class="channels-col__nav"></nav>
+
+    </aside>
+
+    <aside class="channels-col channels-col--list" aria-label="Lista de canais">
+
+      <div class="channels-col__head">
+
+        <h2 id="channels-list-heading" class="channels-col__title">Canais</h2>
+
+      </div>
+
+      <nav id="channels-list" class="channels-col__nav"></nav>
+
+    </aside>
+
+    <div class="channels-col channels-col--player" aria-label="Player de canal">
+
+      <div class="channels-player">
+
+        <div class="channels-player__screen" id="channels-player-screen">
+
+          <video
+
+            id="channels-video"
+
+            class="channels-player__video"
+
+            controls
+
+            playsinline
+
+            poster=""
+
+          ></video>
+
+          <button
+
+            type="button"
+
+            id="channels-fullscreen-btn"
+
+            class="channels-player__fullscreen"
+
+            aria-label="Tela cheia"
+
+            title="Tela cheia"
+
+          >
+
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+
+              <path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/>
+
+            </svg>
+
+          </button>
+
+        </div>
+
+        <p id="channels-now-title" class="channels-player__now">Selecione um canal</p>
+
+      </div>
+
+    </div>
+
+  </section>
+
+
+
+  <main class="content" id="content">
+
+    <section id="browse-panel" class="browse-panel" hidden>
+
+      <h2 id="browse-title" class="browse-panel__title"></h2>
+
+      <p id="browse-meta" class="browse-panel__meta"></p>
+
+      <div id="browse-grid" class="browse-grid"></div>
+
+    </section>
+
+
+
+    <div id="carousel-sections">
+
+    <section class="row" data-row data-row-id="trending">
+
+      <h2 class="row__title"><span class="row__accent"></span>Em alta no Slimflix</h2>
+
+      <div class="row__slider">
+
+        <button class="row__arrow row__arrow--left" aria-label="Rolar para esquerda">
+
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+
+        </button>
+
+        <div class="row__track">
+
+          <p class="row__empty">Importe um arquivo M3U para ver os títulos em alta.</p>
+
+        </div>
+
+        <button class="row__arrow row__arrow--right" aria-label="Rolar para direita">
+
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+
+        </button>
+
+      </div>
+
+    </section>
+
+
+
+    <section class="row" data-row data-row-id="continue">
+
+      <h2 class="row__title"><span class="row__accent"></span>Continuar assistindo</h2>
+
+      <div class="row__slider">
+
+        <button class="row__arrow row__arrow--left" aria-label="Rolar para esquerda">
+
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+
+        </button>
+
+        <div class="row__track">
+
+          <p class="row__empty">Filmes e séries com progresso aparecerão aqui após você assistir.</p>
+
+        </div>
+
+        <button class="row__arrow row__arrow--right" aria-label="Rolar para direita">
+
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+
+        </button>
+
+      </div>
+
+    </section>
+
+
+
+    <section class="row" data-row data-row-id="recommended">
+
+      <h2 class="row__title"><span class="row__accent"></span>Recomendado para você</h2>
+
+      <div class="row__slider">
+
+        <button class="row__arrow row__arrow--left" aria-label="Rolar para esquerda">
+
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+
+        </button>
+
+        <div class="row__track">
+
+          <p class="row__empty">Séries e filmes recomendados serão listados após importar a playlist.</p>
+
+        </div>
+
+        <button class="row__arrow row__arrow--right" aria-label="Rolar para direita">
+
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+
+        </button>
+
+      </div>
+
+    </section>
+
+
+
+    <div id="category-rows"></div>
+
+    </div>
+
+  </main>
+
+    </div>
+
+  </div>
+
+  <div id="series-modal" class="series-modal" hidden aria-hidden="true">
+
+    <button type="button" class="series-modal__close" id="series-close" aria-label="Fechar detalhes">
+
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+
+    </button>
+
+    <div class="series-modal__layout">
+
+      <div class="series-modal__poster-wrap">
+
+        <img id="series-poster" class="series-modal__poster" src="" alt="" />
+
+      </div>
+
+      <div class="series-modal__body">
+
+        <h2 id="series-name" class="series-modal__name"></h2>
+
+        <p id="series-category" class="series-modal__category"></p>
+
+        <p id="series-ep-count" class="series-modal__ep-count"></p>
+
+        <div id="season-tabs" class="season-tabs" role="tablist"></div>
+
+        <div id="episode-grid" class="episode-grid"></div>
+
+      </div>
+
+    </div>
+
+  </div>
+
+
+
+  <div id="player-modal" class="player-modal" hidden aria-hidden="true">
+
+    <button type="button" class="player-modal__close" id="player-close" aria-label="Fechar reprodução">
+
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+
+    </button>
+
+    <div class="player-modal__inner">
+
+      <video id="player-video" class="player-modal__video" controls autoplay playsinline></video>
+
+      <p id="player-title" class="player-modal__title"></p>
+
+    </div>
+
+  </div>
+
+
+
+  <footer class="footer">
+
+    <a href="#" class="footer__logo">
+
+      <span class="logo__slim">slim</span><span class="logo__flix">flix</span>
+
+    </a>
+
+    <p class="footer__tagline">Streaming leve. Menos enrolação, mais história.</p>
+
+    <div class="footer__links">
+
+      <a href="#">Central de ajuda</a>
+
+      <a href="#">Termos de uso</a>
+
+      <a href="#">Privacidade</a>
+
+      <a href="#">Contato</a>
+
+      <a href="#">Carreiras</a>
+
+      <a href="#">Imprensa</a>
+
+    </div>
+
+    <p class="footer__copy">&copy; 2026 Slimflix. Projeto demonstrativo.</p>
+
+  </footer>
+
+  </div>
+
+
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
+
+  <script src="m3uParser.js"></script>
+
+  <script src="xtreamAdapter.js"></script>
+
+  <script src="xtreamSeries.js"></script>
+
+  <script src="script.js"></script>
+
+  <script src="login.js"></script>
+
+</body>
+
+</html>
+
