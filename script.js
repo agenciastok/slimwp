@@ -90,10 +90,10 @@ window.mpegtsPlayer = window.mpegtsPlayer || null;
 
 /** Margem de atraso permitida antes do watchdog corrigir (anti-travamento). */
 const CHANNEL_STALL_MAX_LAG_SEC = 22;
-const CHANNEL_LIVE_EDGE_OFFSET_SEC = 4.5;
-const CHANNEL_INITIAL_PLAYBACK_OFFSET_SEC = 4.5;
-const CHANNEL_STASH_PLAY_DELAY_MS = 3000;
-const CHANNEL_MIN_BUFFER_BEFORE_PLAY_SEC = 4;
+const CHANNEL_LIVE_EDGE_OFFSET_SEC = 12;
+const CHANNEL_INITIAL_PLAYBACK_OFFSET_SEC = 12;
+const CHANNEL_STASH_PLAY_DELAY_MS = 12000;
+const CHANNEL_MIN_BUFFER_BEFORE_PLAY_SEC = 12;
 
 const MPEGTS_LIVE_OPTIONS = {
   enableWorker: true,
