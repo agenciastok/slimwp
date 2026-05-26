@@ -307,24 +307,54 @@ function buildXtreamLiveStreamUrl(entry, originalUrl) {
       return built;
     }
   }
-  return toAbsoluteLiveStreamUrl(originalUrl);
+  return enforceHttpStreamUrl(toAbsoluteLiveStreamUrl(originalUrl));
 }
 
-/** Descritor único para Video.js — só HLS se a URL original já for .m3u8 válida. */
-function getVideoJsLiveSource(streamUrl) {
-  const absolute = (streamUrl || "").trim();
-  if (/\.m3u8(?:\?|#|$)/i.test(absolute) && /\/live\//i.test(absolute)) {
-    return { type: "application/x-mpegURL", src: absolute };
+/** Ambiente VPS: streams sempre em HTTP (nunca forçar HTTPS). */
+function enforceHttpStreamUrl(url) {
+  if (!url) return url;
+  try {
+    const parsed = new URL(String(url).trim());
+    parsed.protocol = "http:";
+    return parsed.href;
+  } catch {
+    return String(url).trim().replace(/^https:/i, "http:");
   }
-  const tsUrl = /\.ts(?:\?|#|$)/i.test(absolute) ? absolute : ensureLiveTsUrl(absolute);
-  return { type: "video/mp2t", src: tsUrl };
+}
+
+/** MIME explícito para Video.js conforme extensão / rota Xtream. */
+function getVideoJsLiveSource(streamUrl) {
+  const absolute = enforceHttpStreamUrl(streamUrl);
+  const lower = absolute.toLowerCase();
+
+  if (lower.includes(".m3u8")) {
+    return { src: absolute, type: "application/x-mpegURL" };
+  }
+
+  let src = absolute;
+  if (lower.includes(".ts") || /\/live\/[^/]+\/[^/]+\/[^/]+/i.test(absolute)) {
+    if (!/\.ts(?:\?|#|$)/i.test(src)) {
+      src = ensureLiveTsUrl(src);
+    }
+    return { src: enforceHttpStreamUrl(src), type: "video/mp2t" };
+  }
+
+  return { src: absolute, type: "video/mp2t" };
+}
+
+function showLiveChannelUnavailable(titleEl, entry, extra = {}) {
+  console.error("[Slimflix] Canal indisponível:", {
+    canal: entry?.name,
+    ...extra,
+  });
+  if (titleEl) titleEl.textContent = "Canal indisponível";
 }
 
 function setVideoJsLiveSource(player, streamUrl) {
   if (!player || typeof player.src !== "function") return Promise.resolve();
   const source = getVideoJsLiveSource(streamUrl);
   try {
-    player.src(source);
+    player.src({ src: source.src, type: source.type });
   } catch (err) {
     console.error("[Slimflix] Video.js player.src():", err, source);
     return Promise.resolve();
@@ -720,7 +750,7 @@ function startMpegtsPlayback(videoEl, url, entry, titleEl, playbackToken) {
 }
 
 /**
- * Canal ao vivo via Video.js (VHS): .ts (video/mp2t) + fallback .m3u8 (HLS) em HTTP direto.
+ * Canal ao vivo via Video.js — somente HTTP; MIME explícito (.m3u8 ou .ts).
  */
 function attachLiveChannelWithVideoJs(videoEl, titleEl, url, entry, playbackToken = null) {
   if (!videoEl || !url) return;
@@ -742,18 +772,8 @@ function attachLiveChannelWithVideoJs(videoEl, titleEl, url, entry, playbackToke
   videoEl.setAttribute("crossorigin", "anonymous");
   videoEl.crossOrigin = "anonymous";
 
-  const canonicalBase = buildXtreamLiveStreamUrl(entry, url);
-  const httpBase = liveStreamUrlWithProtocol(canonicalBase, "http");
-  let httpsBase = liveStreamUrlWithProtocol(canonicalBase, "https");
-  try {
-    const httpsParsed = new URL(httpsBase);
-    httpsParsed.searchParams.set("slimflix_tls", "1");
-    httpsBase = httpsParsed.href;
-  } catch {
-    /* mantém httpsBase */
-  }
-
-  let triedHttps = false;
+  const streamUrl = enforceHttpStreamUrl(buildXtreamLiveStreamUrl(entry, url));
+  const source = getVideoJsLiveSource(streamUrl);
 
   const bindChannelWatchers = (player) => {
     const onReady = () => {
@@ -771,87 +791,60 @@ function attachLiveChannelWithVideoJs(videoEl, titleEl, url, entry, playbackToke
     player.one("playing", onReady);
   };
 
-  const startVideoJs = (streamUrl, protocolLabel) => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) return null;
+  try {
+    const existing = videojs.getPlayer(videoEl);
+    if (existing && !existing.isDisposed()) existing.dispose();
+  } catch {
+    /* ignore */
+  }
 
-    try {
-      const existing = videojs.getPlayer(videoEl);
-      if (existing && !existing.isDisposed()) existing.dispose();
-    } catch {
-      /* ignore */
-    }
+  console.info("[Slimflix] Canal Video.js (HTTP):", {
+    canal: entry?.name,
+    source,
+  });
 
-    const source = getVideoJsLiveSource(streamUrl);
-    console.info("[Slimflix] Canal Video.js (HTTP direto):", {
-      canal: entry?.name,
-      protocol: protocolLabel,
-      source,
-    });
-
-    const player = videojs(
-      videoEl,
-      {
-        controls: true,
-        autoplay: false,
-        preload: "auto",
-        fluid: false,
-        fill: true,
-        liveui: true,
-        playsinline: true,
-        responsive: false,
-        html5: {
-          vhs: {
-            overrideNative: !videojs.browser.IS_ANY_SAFARI,
-            enableLowInitialPlaylist: true,
-            smoothQualityChange: true,
-          },
+  const player = videojs(
+    videoEl,
+    {
+      controls: true,
+      autoplay: false,
+      preload: "auto",
+      fluid: false,
+      fill: true,
+      liveui: true,
+      playsinline: true,
+      responsive: false,
+      html5: {
+        vhs: {
+          overrideNative: !videojs.browser.IS_ANY_SAFARI,
+          enableLowInitialPlaylist: true,
+          smoothQualityChange: true,
         },
       },
-      function onPlayerReady() {
-        if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-        setVideoJsLiveSource(this, streamUrl);
-      }
-    );
+    },
+    function onPlayerReady() {
+      if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+      setVideoJsLiveSource(this, streamUrl);
+    }
+  );
 
-    activeVideoJs = player;
-    bindChannelWatchers(player);
-    return player;
-  };
+  activeVideoJs = player;
+  bindChannelWatchers(player);
 
-  const onFinalError = (player) => {
+  player.one("error", () => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    const err = player?.error?.();
-    console.error("[Slimflix] Canal Video.js indisponível:", {
-      canal: entry?.name,
-      http: httpBase,
-      https: httpsBase,
+    const err = player.error?.();
+    showLiveChannelUnavailable(titleEl, entry, {
+      url: streamUrl,
+      type: source.type,
       code: err?.code,
       message: err?.message,
     });
-    if (titleEl) {
-      titleEl.textContent = `Erro ao carregar: ${entry?.name || "canal"}`;
-    }
-  };
-
-  const player = startVideoJs(httpBase, "http");
-  if (!player) return;
-
-  player.on("error", () => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-
-    if (!triedHttps) {
-      triedHttps = true;
-      console.info("[Slimflix] Canal Video.js: fallback HTTP → HTTPS via player.src()");
-      setVideoJsLiveSource(player, httpsBase);
-      player.one("error", () => onFinalError(player));
-      return;
-    }
-    onFinalError(player);
   });
 }
 
 /**
- * Fallback sem Video.js: <video> nativo HTTP → HTTPS.
+ * Fallback sem Video.js: <video> nativo em HTTP.
  */
 function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = null) {
   if (!videoEl || !url) return;
@@ -867,18 +860,7 @@ function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = n
   videoEl.setAttribute("crossorigin", "anonymous");
   videoEl.crossOrigin = "anonymous";
 
-  const canonicalBase = buildXtreamLiveStreamUrl(entry, url);
-  const httpUrl = liveStreamUrlWithProtocol(canonicalBase, "http");
-  let httpsUrl = liveStreamUrlWithProtocol(canonicalBase, "https");
-  try {
-    const httpsParsed = new URL(httpsUrl);
-    httpsParsed.searchParams.set("slimflix_tls", "1");
-    httpsUrl = httpsParsed.href;
-  } catch {
-    /* mantém httpsUrl sem query */
-  }
-
-  let triedHttps = false;
+  const streamUrl = enforceHttpStreamUrl(buildXtreamLiveStreamUrl(entry, url));
 
   const bindLoaded = () => {
     if (videoEl !== channelsVideo || playbackToken !== channelPlaybackToken) return;
@@ -892,9 +874,8 @@ function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = n
     else if (native?.addEventListener) native.addEventListener("loadeddata", onReady, { once: true });
   };
 
-  const playAbsoluteUrl = (src) => {
+  const playHttpUrl = () => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    const streamUrl = buildXtreamLiveStreamUrl(entry, src);
     const vjsPlayer = videoEl === channelsVideo ? getActiveChannelsVideoJsPlayer() : null;
     if (vjsPlayer) {
       setVideoJsLiveSource(vjsPlayer, streamUrl);
@@ -912,40 +893,20 @@ function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = n
 
   const onPlayError = () => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-
-    if (!triedHttps) {
-      triedHttps = true;
-      console.info("[Slimflix] Canal: fallback HTTP → HTTPS (direto, sem proxy)", {
-        http: httpUrl,
-        https: httpsUrl,
-      });
-      videoEl.removeEventListener("error", onPlayError);
-      videoEl.addEventListener("error", onFinalError, { once: true });
-      playAbsoluteUrl(httpsUrl);
-      return;
-    }
-  };
-
-  const onFinalError = () => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    console.error("[Slimflix] Canal indisponível (HTTP e HTTPS):", {
-      canal: entry?.name,
-      http: httpUrl,
-      https: httpsUrl,
-      code: videoEl.error?.code,
+    const native = resolveNativeVideoElement(videoEl) || videoEl;
+    showLiveChannelUnavailable(titleEl, entry, {
+      url: streamUrl,
+      code: native?.error?.code,
     });
-    if (titleEl) {
-      titleEl.textContent = `Erro ao carregar: ${entry?.name || "canal"}`;
-    }
   };
 
-  console.info("[Slimflix] Canal: tentando HTTP direto (URL absoluta)", {
+  console.info("[Slimflix] Canal: HTTP direto (nativo)", {
     canal: entry?.name,
-    url: httpUrl,
+    url: streamUrl,
   });
 
-  videoEl.addEventListener("error", onPlayError);
-  playAbsoluteUrl(httpUrl);
+  videoEl.addEventListener("error", onPlayError, { once: true });
+  playHttpUrl();
 }
 
 function startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playbackToken) {
@@ -1041,7 +1002,7 @@ function openPlayer(entry) {
     console.info("[Slimflix] Reproduzindo canal (direto, sem proxy):", {
       nome: entry.name,
       urlOriginal: entry.url,
-      urlHttp: liveStreamUrlWithProtocol(abs, "http"),
+      urlHttp: enforceHttpStreamUrl(abs),
       streamId: entry.xtreamStreamId,
     });
   }
@@ -1106,7 +1067,7 @@ function playChannelInline(entry) {
     nome: entry.name,
     pasta: pastaCanalAtiva,
     urlOriginal: entry.url,
-    urlHttp: liveStreamUrlWithProtocol(abs, "http"),
+    urlHttp: enforceHttpStreamUrl(abs),
     streamId: entry.xtreamStreamId,
   });
 }
