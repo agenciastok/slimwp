@@ -133,9 +133,35 @@
 
   function formatFetchError(err) {
     if (err?.name === "TypeError" && /fetch|network|Failed/i.test(String(err.message))) {
-      return "Erro de rede ou CORS — o navegador bloqueou a requisição ao painel IPTV.";
+      return "Erro de rede ao contatar o painel IPTV (proxy ou servidor indisponível).";
     }
     return err?.message || "Erro desconhecido na API Xtream.";
+  }
+
+  /** Rota Vercel serverless — evita CORS no browser. */
+  function buildProxyUrl(targetUrl) {
+    return `/api/proxy?url=${encodeURIComponent(targetUrl)}`;
+  }
+
+  /**
+   * GET na Xtream API via proxy (/api/proxy). Em localhost sem Vercel, tenta fetch direto.
+   */
+  async function fetchXtreamUrl(targetUrl) {
+    const proxyUrl = buildProxyUrl(targetUrl);
+    let response;
+
+    try {
+      response = await fetch(proxyUrl, { method: "GET", credentials: "same-origin" });
+    } catch (proxyErr) {
+      console.warn("[SlimFlix Xtream] Proxy indisponível, tentando origem direta:", proxyErr);
+      response = await fetch(targetUrl, { method: "GET" });
+    }
+
+    if (!response.ok && response.status === 404 && /localhost|127\.0\.0\.1/.test(window.location.hostname)) {
+      response = await fetch(targetUrl, { method: "GET" });
+    }
+
+    return response;
   }
 
   function normalizeServerUrl(raw) {
@@ -222,8 +248,8 @@
     return status === "active";
   }
 
-  function buildPlayerApiUrl(username, password, action, extraParams = {}) {
-    const base = normalizeServerUrl(IPTV_SERVER);
+  function buildPlayerApiUrl(username, password, action, extraParams = {}, serverBase) {
+    const base = normalizeServerUrl(serverBase || IPTV_SERVER);
     const params = new URLSearchParams({
       username,
       password,
@@ -246,8 +272,8 @@
     if (!server || !username || !password) {
       throw new Error("Sessão Xtream não encontrada. Faça login novamente.");
     }
-    const url = buildPlayerApiUrl(username, password, action, extraParams);
-    const response = await fetch(url, { method: "GET" });
+    const url = buildPlayerApiUrl(username, password, action, extraParams, server);
+    const response = await fetchXtreamUrl(url);
     if (!response.ok) {
       throw new Error(`Servidor respondeu com erro HTTP ${response.status}.`);
     }
@@ -267,11 +293,11 @@
       };
     }
 
-    const url = buildPlayerApiUrl(username, password);
+    const url = buildPlayerApiUrl(username, password, undefined, {}, server);
 
     let data;
     try {
-      const response = await fetch(url, { method: "GET" });
+      const response = await fetchXtreamUrl(url);
       if (!response.ok) {
         return {
           ok: false,
@@ -284,7 +310,7 @@
       return {
         ok: false,
         message:
-          "Falha na conexão com o servidor. Verifique IPTV_SERVER ou bloqueio CORS do painel.",
+          "Falha na conexão com o servidor. Verifique IPTV_SERVER ou se o proxy /api/proxy está ativo na Vercel.",
       };
     }
 
@@ -674,6 +700,8 @@
     hasActiveSession,
     enforceGuestOnlyUI,
     parseStoredSession,
+    buildProxyUrl,
+    fetchXtreamUrl,
     authenticateXtream,
     getLoginCredentials,
     getStoredSession,
