@@ -367,29 +367,17 @@ function isXtreamLiveStreamUrl(url) {
   return /\/live\//i.test(url || "");
 }
 
-function isAppOnHttps() {
-  return typeof window !== "undefined" && window.location.protocol === "https:";
-}
-
-/** Em produção (Vercel HTTPS), tenta o mesmo host com TLS no stream. */
-function upgradeStreamUrlToHttps(url) {
-  if (!url || !isAppOnHttps()) return url;
-  return url.replace(/^http:\/\//i, "https://");
-}
-
-/** Proxy forçado para live (fallback mixed content) — pedidos segmentados HLS. */
-function proxyLiveStreamUrl(url) {
-  const trimmed = (url || "").trim();
-  if (!trimmed) return trimmed;
-  return window.SlimFlixAuth?.wrapUrlForProxy?.(trimmed, { force: true }) || trimmed;
-}
-
-/** VOD → proxy; live → direto (HTTP local) ou HTTPS/proxy conforme ambiente. */
+/** VOD/filmes/séries → proxy; canais /live/ nunca passam pelo proxy. */
 function proxyStreamUrl(url, entry) {
   const trimmed = (url || "").trim();
   if (!trimmed) return trimmed;
   if (isCanal(entry) || isXtreamLiveStreamUrl(trimmed)) return trimmed;
   return window.SlimFlixAuth?.wrapUrlForProxy?.(trimmed) || trimmed;
+}
+
+/** http:// → https:// no stream ao vivo (painel com TLS nativo). */
+function forceLiveStreamHttps(url) {
+  return (url || "").trim().replace(/^http:\/\//i, "https://");
 }
 
 /**
@@ -412,77 +400,21 @@ function ensureLiveTsUrl(url) {
   }
 }
 
-/** URLs de reprodução: live com HTTPS + fallback proxy; VOD via proxy. */
-function resolvePlaybackUrls(originalUrl, entry, options = {}) {
-  const { preferMpegts = false } = options;
-  const trimmed = (originalUrl || "").trim();
-  const live = isCanal(entry) || isXtreamLiveStreamUrl(trimmed);
-
-  if (live) {
-    const tsUrl = ensureLiveTsUrl(trimmed);
-    const hlsUrl = normalizeChannelStreamUrl(trimmed, entry);
-    const directTsUrl = upgradeStreamUrlToHttps(tsUrl);
-    const directHlsUrl = upgradeStreamUrlToHttps(hlsUrl);
-    const proxyTsUrl = proxyLiveStreamUrl(tsUrl);
-    const proxyHlsUrl = proxyLiveStreamUrl(hlsUrl);
-    const secure = isAppOnHttps();
-    const useMpegts = preferMpegts && isRawTsStreamUrl(tsUrl) && !secure;
-
-    let streamUrl = useMpegts ? tsUrl : hlsUrl;
-    if (secure) streamUrl = directHlsUrl;
-
-    return {
-      live: true,
-      secure,
-      original: trimmed,
-      tsUrl,
-      hlsUrl,
-      directTsUrl,
-      directHlsUrl,
-      proxyTsUrl,
-      proxyHlsUrl,
-      streamUrl,
-    };
-  }
-
-  const proxied = proxyStreamUrl(trimmed, entry);
-  return {
-    live: false,
-    secure: false,
-    original: trimmed,
-    tsUrl: proxied,
-    hlsUrl: proxied,
-    streamUrl: proxied,
-  };
+/** URL final do canal: .ts + https:// direto no <video> (sem proxy, sem Hls.js). */
+function buildLiveChannelVideoUrl(originalUrl) {
+  return forceLiveStreamHttps(ensureLiveTsUrl(originalUrl));
 }
 
-function createHlsConfig(isChannelsPlayer = false, useLiveProxy = false) {
+function createHlsConfig() {
   const config = {
     enableWorker: true,
     lowLatencyMode: true,
-    ...(isChannelsPlayer
-      ? {
-          backBufferLength: 0,
-          maxBufferLength: 6,
-          maxMaxBufferLength: 10,
-          liveSyncDurationCount: 2,
-        }
-      : {}),
   };
-
-  const needsProxyXhr =
-    (isChannelsPlayer && useLiveProxy) ||
-    (!isChannelsPlayer && typeof window.SlimFlixAuth?.wrapUrlForProxy === "function");
-
-  if (needsProxyXhr) {
+  if (typeof window.SlimFlixAuth?.wrapUrlForProxy === "function") {
     config.xhrSetup = (xhr, requestUrl) => {
-      const finalUrl = isChannelsPlayer
-        ? proxyLiveStreamUrl(requestUrl)
-        : proxyStreamUrl(requestUrl);
-      xhr.open("GET", finalUrl, true);
+      xhr.open("GET", proxyStreamUrl(requestUrl), true);
     };
   }
-
   return config;
 }
 
@@ -580,197 +512,107 @@ function startMpegtsPlayback(videoEl, url, entry, titleEl, playbackToken) {
   }
 }
 
-function bindHlsParsedHandler(activeHlsInstance, videoEl, titleEl, playbackToken, isChannelsPlayer) {
-  activeHlsInstance.on(Hls.Events.MANIFEST_PARSED, () => {
-    if (isChannelsPlayer && playbackToken === channelPlaybackToken) {
-      const startWithOffset = () => {
-        if (playbackToken !== channelPlaybackToken) return;
-        applyChannelSafePlaybackOffset(videoEl);
-        videoEl.play().catch(() => {});
-        startChannelStallWatcher(videoEl, playbackToken);
-      };
-      if (videoEl.buffered?.length > 0) startWithOffset();
-      else videoEl.addEventListener("loadeddata", startWithOffset, { once: true });
-      return;
-    }
-    videoEl.play().catch(() => {});
-  });
-}
-
-function startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playbackToken, hlsOpts = {}) {
-  if (!videoEl) return;
+/**
+ * Canal ao vivo: stream .ts em HTTPS direto no <video> (sem proxy, sem Hls.js, sem mpegts.js).
+ */
+function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = null) {
+  if (!videoEl || !url) return;
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  const isChannelsPlayer = videoEl === channelsVideo;
-  const useLiveProxy = Boolean(hlsOpts.useLiveProxy);
-  let triedPathFallback = false;
-  let triedSecureProxy = false;
+  destroyHls();
+  destroyMpegts();
 
-  const mountHls = (urlToLoad, proxyMode) => {
-    activeHls = new Hls(createHlsConfig(isChannelsPlayer, proxyMode));
-    bindHlsParsedHandler(activeHls, videoEl, titleEl, playbackToken, isChannelsPlayer);
+  if (videoEl === channelsVideo) {
+    prepareChannelsVideoElement();
+  }
 
-    activeHls.on(Hls.Events.ERROR, (_event, data) => {
-      logHlsError(urlToLoad, entry, data);
-      if (!data.fatal) return;
+  const streamSrc = buildLiveChannelVideoUrl(url);
 
-      if (
-        isChannelsPlayer &&
-        hlsOpts.onHttpsFailed &&
-        !triedSecureProxy &&
-        !proxyMode
-      ) {
-        triedSecureProxy = true;
-        console.info("[Slimflix] Canal: HTTPS direto falhou, tentando proxy HLS…", {
-          url: urlToLoad,
-        });
-        activeHls.destroy();
-        hlsOpts.onHttpsFailed();
-        return;
-      }
+  videoEl.src = streamSrc;
+  videoEl.load();
+  videoEl.play().catch(() => {});
 
-      if (!triedPathFallback && isCanal(entry) && originalUrl) {
-        const fallback = getChannelStreamFallbackUrl(originalUrl);
-        const fallbackPlay = isAppOnHttps()
-          ? upgradeStreamUrlToHttps(fallback)
-          : fallback;
-        if (fallbackPlay && fallbackPlay !== urlToLoad) {
-          triedPathFallback = true;
-          console.info("[Slimflix] Tentando fallback HLS de path:", {
-            primary: urlToLoad,
-            fallback: fallbackPlay,
-            proxy: proxyMode,
-          });
-          activeHls.destroy();
-          mountHls(proxyMode ? proxyLiveStreamUrl(fallback) : fallbackPlay, proxyMode);
-          return;
-        }
-      }
+  if (videoEl === channelsVideo && playbackToken === channelPlaybackToken) {
+    videoEl.addEventListener(
+      "loadeddata",
+      () => {
+        if (playbackToken !== channelPlaybackToken) return;
+        applyChannelSafePlaybackOffset(videoEl);
+        startChannelStallWatcher(videoEl, playbackToken);
+      },
+      { once: true }
+    );
+  }
 
+  videoEl.addEventListener(
+    "error",
+    () => {
+      console.error("[Slimflix] Erro no canal (src direto):", {
+        canal: entry?.name,
+        src: streamSrc,
+        code: videoEl.error?.code,
+      });
       if (titleEl) {
         titleEl.textContent = `Erro ao carregar: ${entry?.name || "canal"}`;
       }
-    });
+    },
+    { once: true }
+  );
+}
 
+function startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playbackToken) {
+  if (!videoEl) return;
+  if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+
+  activeHls = new Hls(createHlsConfig());
+
+  const tryLoad = (urlToLoad) => {
     activeHls.loadSource(urlToLoad);
     activeHls.attachMedia(videoEl);
   };
 
-  mountHls(streamUrl, useLiveProxy);
-}
+  activeHls.on(Hls.Events.MANIFEST_PARSED, () => {
+    videoEl.play().catch(() => {});
+  });
 
-function attachLiveStreamSecure(videoEl, titleEl, entry, urls, options = {}) {
-  const { playbackToken = null } = options;
-
-  const tryHlsDirect = () => {
-    startHlsPlayback(urls.directHlsUrl, entry, urls.original, videoEl, titleEl, playbackToken, {
-      useLiveProxy: false,
-      onHttpsFailed: tryHlsProxy,
-    });
-  };
-
-  const tryHlsProxy = () => {
-    console.info("[Slimflix] Canal via proxy HTTPS (segmentos HLS):", {
-      url: urls.proxyHlsUrl,
-    });
-    startHlsPlayback(urls.proxyHlsUrl, entry, urls.original, videoEl, titleEl, playbackToken, {
-      useLiveProxy: true,
-    });
-  };
-
-  if (typeof Hls !== "undefined" && Hls.isSupported()) {
-    tryHlsDirect();
-    return;
-  }
-
-  if (videoEl.canPlayType("application/vnd.apple.mpegurl")) {
-    let triedProxy = false;
-    const playSrc = (src) => {
-      videoEl.src = src;
-      videoEl.load();
-      videoEl.play().catch(() => {});
-    };
-    videoEl.addEventListener("error", () => {
-      if (!triedProxy && urls.proxyHlsUrl !== urls.directHlsUrl) {
-        triedProxy = true;
-        console.info("[Slimflix] Canal Safari: fallback proxy HLS");
-        playSrc(urls.proxyHlsUrl);
-        return;
-      }
-      if (titleEl) titleEl.textContent = `Erro ao carregar: ${entry?.name || "canal"}`;
-    });
-    playSrc(urls.directHlsUrl);
-    if (videoEl === channelsVideo && playbackToken === channelPlaybackToken) {
-      videoEl.addEventListener(
-        "loadeddata",
-        () => {
-          applyChannelSafePlaybackOffset(videoEl);
-          startChannelStallWatcher(videoEl, playbackToken);
-        },
-        { once: true }
-      );
+  activeHls.on(Hls.Events.ERROR, (_event, data) => {
+    logHlsError(streamUrl, entry, data);
+    if (data.fatal && titleEl) {
+      titleEl.textContent = `Erro ao carregar: ${entry?.name || "Filme"}`;
     }
-    return;
-  }
+  });
 
-  videoEl.src = urls.directTsUrl;
-  videoEl.load();
-  videoEl.play().catch(() => {});
+  tryLoad(streamUrl);
 }
 
 function attachStreamToVideo(videoEl, titleEl, url, entry, options = {}) {
   if (!videoEl || !url) return;
 
-  const { preferMpegts = false, playbackToken = null } = options;
-  const urls = resolvePlaybackUrls(url, entry, {
-    preferMpegts: preferMpegts && !isAppOnHttps(),
-  });
+  const { playbackToken = null } = options;
+  const trimmed = url.trim();
+  const live = isCanal(entry) || isXtreamLiveStreamUrl(trimmed);
 
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  if (urls.live && urls.secure) {
-    attachLiveStreamSecure(videoEl, titleEl, entry, urls, { playbackToken });
+  if (live) {
+    attachLiveChannelDirect(videoEl, titleEl, trimmed, entry, playbackToken);
     return;
   }
 
-  if (preferMpegts && urls.live && isRawTsStreamUrl(urls.tsUrl)) {
-    const tsPlayUrl = urls.secure ? urls.directTsUrl : urls.tsUrl;
-    if (startMpegtsPlayback(videoEl, tsPlayUrl, entry, titleEl, playbackToken)) {
-      return;
-    }
-    destroyMpegts();
-  }
-
-  if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-
-  const streamUrl = urls.streamUrl;
-  const useHls = needsHlsPlayback(urls.hlsUrl, entry);
+  const streamUrl = proxyStreamUrl(trimmed, entry);
+  const useHls = needsHlsPlayback(streamUrl, entry);
 
   if (useHls && typeof Hls !== "undefined" && Hls.isSupported()) {
-    startHlsPlayback(streamUrl, entry, urls.original, videoEl, titleEl, playbackToken);
+    startHlsPlayback(streamUrl, entry, trimmed, videoEl, titleEl, playbackToken);
     return;
   }
 
   if (useHls && videoEl.canPlayType("application/vnd.apple.mpegurl")) {
     videoEl.src = streamUrl;
-    videoEl.addEventListener("loadedmetadata", () => {
-      if (videoEl === channelsVideo && playbackToken === channelPlaybackToken) {
-        applyChannelSafePlaybackOffset(videoEl);
-        videoEl.play().catch(() => {});
-        startChannelStallWatcher(videoEl, playbackToken);
-        return;
-      }
-      videoEl.play().catch(() => {});
-    }, { once: true });
     videoEl.addEventListener(
-      "error",
+      "loadedmetadata",
       () => {
-        console.error("[Slimflix] Erro nativo HLS (Safari):", {
-          canal: entry?.name,
-          url: streamUrl,
-          code: videoEl.error?.code,
-          message: videoEl.error?.message,
-        });
+        videoEl.play().catch(() => {});
       },
       { once: true }
     );
@@ -780,16 +622,6 @@ function attachStreamToVideo(videoEl, titleEl, url, entry, options = {}) {
   videoEl.src = streamUrl;
   videoEl.load();
   videoEl.play().catch(() => {});
-  if (videoEl === channelsVideo && playbackToken === channelPlaybackToken) {
-    videoEl.addEventListener(
-      "loadeddata",
-      () => {
-        applyChannelSafePlaybackOffset(videoEl);
-        startChannelStallWatcher(videoEl, playbackToken);
-      },
-      { once: true }
-    );
-  }
 }
 
 function attachStreamToPlayer(url, entry) {
@@ -797,10 +629,7 @@ function attachStreamToPlayer(url, entry) {
 }
 
 function attachStreamToChannelsPlayer(url, entry, playbackToken) {
-  attachStreamToVideo(channelsVideo, channelsNowTitle, url, entry, {
-    preferMpegts: true,
-    playbackToken,
-  });
+  attachStreamToVideo(channelsVideo, channelsNowTitle, url, entry, { playbackToken });
 }
 
 function openPlayer(entry) {
@@ -816,12 +645,10 @@ function openPlayer(entry) {
   resetPlayerElement();
   attachStreamToPlayer(entry.url, entry);
   if (isCanal(entry)) {
-    const liveUrls = resolvePlaybackUrls(entry.url, entry, { preferMpegts: true });
-    console.info("[Slimflix] Reproduzindo canal (URL direta):", {
+    console.info("[Slimflix] Reproduzindo canal (HTTPS direto no vídeo):", {
       nome: entry.name,
-      urlOriginal: liveUrls.original,
-      urlTs: liveUrls.tsUrl,
-      urlReproducao: liveUrls.streamUrl,
+      urlOriginal: entry.url,
+      urlVideo: buildLiveChannelVideoUrl(entry.url),
     });
   }
 
@@ -880,15 +707,11 @@ function playChannelInline(entry) {
   canalReproduzindoUrl = entry.url;
   attachStreamToChannelsPlayer(entry.url, entry, playbackToken);
 
-  const liveUrls = resolvePlaybackUrls(entry.url, entry, { preferMpegts: true });
-  console.info("[Slimflix] Reproduzindo canal (guia):", {
+  console.info("[Slimflix] Reproduzindo canal (guia, HTTPS direto):", {
     nome: entry.name,
     pasta: pastaCanalAtiva,
-    urlOriginal: liveUrls.original,
-    urlTs: liveUrls.tsUrl,
-    urlHlsHttps: liveUrls.directHlsUrl,
-    urlHlsProxy: liveUrls.proxyHlsUrl,
-    secure: liveUrls.secure,
+    urlOriginal: entry.url,
+    urlVideo: buildLiveChannelVideoUrl(entry.url),
   });
 }
 
