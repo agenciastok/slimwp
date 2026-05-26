@@ -82,16 +82,27 @@ let renderGeneration = 0;
 let activeHls = null;
 let channelPlaybackToken = 0;
 let canalReproduzindoUrl = null;
+let channelStallWatchId = null;
+let channelPlayDelayTimer = null;
 
 /** Instância global do mpegts.js para canais ao vivo (.ts). */
 window.mpegtsPlayer = window.mpegtsPlayer || null;
 
+/** Margem de atraso permitida antes do watchdog corrigir (anti-travamento). */
+const CHANNEL_STALL_MAX_LAG_SEC = 22;
+const CHANNEL_LIVE_EDGE_OFFSET_SEC = 4.5;
+const CHANNEL_INITIAL_PLAYBACK_OFFSET_SEC = 4.5;
+const CHANNEL_STASH_PLAY_DELAY_MS = 3000;
+const CHANNEL_MIN_BUFFER_BEFORE_PLAY_SEC = 4;
+
 const MPEGTS_LIVE_OPTIONS = {
   enableWorker: true,
   enableStashBuffer: true,
-  stashInitialSize: 1024 * 512,
-  liveBufferLatencyChasing: true,
+  stashInitialSize: 1024 * 1024 * 3,
+  liveBufferLatencyChasing: false,
   autoCleanupSourceBuffer: true,
+  autoCleanupMaxBackwardDuration: 5,
+  autoCleanupMinBackwardDuration: 2,
 };
 
 /* ─── Scroll navbar ─── */
@@ -237,7 +248,148 @@ function showLiveChannelUnavailable(titleEl, entry, extra = {}) {
   if (titleEl) titleEl.textContent = "Canal indisponível";
 }
 
+function clearChannelStallWatcher() {
+  if (channelStallWatchId != null) {
+    clearInterval(channelStallWatchId);
+    channelStallWatchId = null;
+  }
+}
+
+function clearChannelPlayDelay() {
+  if (channelPlayDelayTimer != null) {
+    clearTimeout(channelPlayDelayTimer);
+    channelPlayDelayTimer = null;
+  }
+}
+
+/** Inicia ~4–5s atrás da borda do buffer para margem de segurança ao vivo. */
+function applyChannelSafePlaybackOffset(videoEl) {
+  if (!videoEl?.buffered || videoEl.buffered.length === 0) return false;
+
+  const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+  const bufferedStart = videoEl.buffered.start(0);
+  const target = Math.max(
+    bufferedStart,
+    bufferedEnd - CHANNEL_INITIAL_PLAYBACK_OFFSET_SEC
+  );
+
+  try {
+    videoEl.currentTime = target;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Aguarda stash/buffer inicial antes do play (evita travamento ao trocar de canal).
+ */
+function scheduleMpegtsDelayedPlay(playbackToken, videoElement, entry, titleEl) {
+  clearChannelPlayDelay();
+
+  if (!window.mpegtsPlayer || !videoElement) return;
+
+  if (titleEl) {
+    titleEl.textContent = "Preparando buffer…";
+  }
+
+  try {
+    window.mpegtsPlayer.pause();
+  } catch {
+    /* ignore */
+  }
+  try {
+    videoElement.pause();
+  } catch {
+    /* ignore */
+  }
+
+  const startedAt = Date.now();
+
+  const beginPlayback = () => {
+    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+    if (!window.mpegtsPlayer) return;
+
+    applyChannelSafePlaybackOffset(videoElement);
+
+    try {
+      window.mpegtsPlayer.play();
+    } catch (err) {
+      console.warn("[Slimflix] mpegts.play após buffer:", err);
+    }
+
+    try {
+      const playPromise = videoElement.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch(() => {});
+      }
+    } catch (err) {
+      console.warn("[Slimflix] video.play após buffer:", err);
+    }
+
+    if (titleEl && entry) {
+      titleEl.textContent = entry.name || entry.label || "Canal";
+    }
+
+    startChannelStallWatcher(videoElement, playbackToken);
+  };
+
+  const waitForBuffer = () => {
+    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+
+    let bufferedAhead = 0;
+    if (videoElement.buffered && videoElement.buffered.length > 0) {
+      const end = videoElement.buffered.end(videoElement.buffered.length - 1);
+      const start = videoElement.buffered.start(0);
+      bufferedAhead = end - Math.max(videoElement.currentTime, start);
+    }
+
+    const elapsed = Date.now() - startedAt;
+    const bufferReady = bufferedAhead >= CHANNEL_MIN_BUFFER_BEFORE_PLAY_SEC;
+    const delayElapsed = elapsed >= CHANNEL_STASH_PLAY_DELAY_MS;
+
+    if (bufferReady || delayElapsed) {
+      clearChannelPlayDelay();
+      beginPlayback();
+      return;
+    }
+
+    channelPlayDelayTimer = setTimeout(waitForBuffer, 250);
+  };
+
+  channelPlayDelayTimer = setTimeout(waitForBuffer, 500);
+}
+
+/** Salta para a borda ao vivo se o buffer acumular atraso excessivo. */
+function startChannelStallWatcher(videoEl, playbackToken) {
+  clearChannelStallWatcher();
+  if (!videoEl) return;
+
+  channelStallWatchId = setInterval(() => {
+    if (playbackToken != null && playbackToken !== channelPlaybackToken) {
+      clearChannelStallWatcher();
+      return;
+    }
+    if (videoEl.paused || videoEl.readyState < 2) return;
+    if (!videoEl.buffered || videoEl.buffered.length === 0) return;
+
+    const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+    const lag = bufferedEnd - videoEl.currentTime;
+
+    if (lag > CHANNEL_STALL_MAX_LAG_SEC) {
+      const target = Math.max(0, bufferedEnd - CHANNEL_LIVE_EDGE_OFFSET_SEC);
+      try {
+        videoEl.currentTime = target;
+      } catch {
+        /* seek na borda ao vivo pode falhar em alguns browsers */
+      }
+    }
+  }, 400);
+}
+
 function teardownChannelPlayer() {
+  clearChannelPlayDelay();
+  clearChannelStallWatcher();
   destroyHls();
   destroyMpegts();
   canalReproduzindoUrl = null;
@@ -343,6 +495,7 @@ function playLiveChannel(entry, playbackToken) {
 
     window.mpegtsPlayer.on(mpegts.Events.ERROR, () => {
       if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+      clearChannelPlayDelay();
       try {
         videoElement.pause();
       } catch {
@@ -352,9 +505,7 @@ function playLiveChannel(entry, playbackToken) {
       showLiveChannelUnavailable(channelsNowTitle, entry, { url: urlDoCanal });
     });
 
-    window.mpegtsPlayer
-      .play()
-      .catch((err) => console.warn("[Slimflix] mpegts.play():", err));
+    scheduleMpegtsDelayedPlay(playbackToken, videoElement, entry, channelsNowTitle);
   } catch (err) {
     console.error("[Slimflix] Falha ao iniciar mpegts:", err);
     destroyMpegts();
