@@ -81,6 +81,7 @@ let savedScrollY = 0;
 let renderGeneration = 0;
 let activeHls = null;
 let activeMpegts = null;
+let activeVideoJs = null;
 let channelPlaybackToken = 0;
 let canalReproduzindoUrl = null;
 let channelStallWatchId = null;
@@ -147,14 +148,90 @@ function destroyMpegts() {
   destroyMpegtsPlayerInstance(playerInstancia);
 }
 
+function destroyVideoJs() {
+  if (!activeVideoJs) return;
+  try {
+    if (typeof activeVideoJs.isDisposed === "function" && !activeVideoJs.isDisposed()) {
+      activeVideoJs.dispose();
+    }
+  } catch {
+    /* ignore */
+  }
+  activeVideoJs = null;
+  if (channelsVideo) {
+    channelsVideo.classList.add("video-js", "vjs-default-skin", "channels-player__video");
+  }
+}
+
+function shouldUseVideoJsForLive(url) {
+  const lower = (url || "").toLowerCase();
+  return /\.ts(?:\?|$)/i.test(lower) || /\/live\//i.test(lower);
+}
+
+/** Variante HLS do Xtream para VHS (Video.js) quando .ts não roda nativo no Chrome. */
+function liveTsUrlToM3u8(url) {
+  const trimmed = (url || "").trim();
+  if (!trimmed) return trimmed;
+  if (/\.m3u8(?:\?|$)/i.test(trimmed)) return trimmed;
+  if (/\.ts(?:\?|$)/i.test(trimmed)) {
+    return trimmed.replace(/\.ts(?=[?#]|$)/i, ".m3u8");
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (/\/live\//i.test(parsed.pathname) && !/\.[a-z0-9]+$/i.test(parsed.pathname)) {
+      parsed.pathname = `${parsed.pathname.replace(/\/$/, "")}.m3u8`;
+      return parsed.href;
+    }
+  } catch {
+    /* ignore */
+  }
+  return trimmed;
+}
+
+function getLiveStreamMimeType(url) {
+  if (/\.m3u8(?:\?|$)/i.test(url || "")) return "application/x-mpegURL";
+  return "video/mp2t";
+}
+
+function buildLiveVideoJsSources(baseUrl) {
+  const absolute = toAbsoluteLiveStreamUrl(baseUrl);
+  const tsUrl = ensureLiveTsUrl(absolute);
+  const m3u8Url = liveTsUrlToM3u8(tsUrl);
+  const sources = [];
+
+  if (shouldUseVideoJsForLive(tsUrl)) {
+    sources.push({ src: tsUrl, type: "video/mp2t" });
+  }
+  if (m3u8Url && m3u8Url !== tsUrl) {
+    sources.push({ src: m3u8Url, type: "application/x-mpegURL" });
+  }
+  if (!sources.length) {
+    sources.push({ src: absolute, type: getLiveStreamMimeType(absolute) });
+  }
+  return sources;
+}
+
+function getVideoJsTechVideo(fallbackEl) {
+  if (activeVideoJs && typeof activeVideoJs.tech === "function") {
+    try {
+      const tech = activeVideoJs.tech(true);
+      if (tech?.el) return tech.el();
+    } catch {
+      /* ignore */
+    }
+  }
+  return fallbackEl;
+}
+
 function prepareChannelsVideoElement() {
   if (!channelsVideo) return;
+  channelsVideo.classList.add("video-js", "vjs-default-skin", "channels-player__video");
   channelsVideo.playsInline = true;
   channelsVideo.setAttribute("playsinline", "");
   channelsVideo.setAttribute("webkit-playsinline", "");
   channelsVideo.setAttribute("crossorigin", "anonymous");
   channelsVideo.crossOrigin = "anonymous";
-  channelsVideo.preload = "none";
+  channelsVideo.preload = "auto";
   channelsVideo.style.transform = "translateZ(0)";
   channelsVideo.style.backfaceVisibility = "hidden";
 }
@@ -291,6 +368,7 @@ function teardownChannelPlayer() {
   clearChannelStallWatcher();
   destroyHls();
   destroyMpegts();
+  destroyVideoJs();
   canalReproduzindoUrl = null;
 
   if (!channelsVideo) return;
@@ -369,10 +447,10 @@ function isXtreamLiveStreamUrl(url) {
   return /\/live\//i.test(url || "");
 }
 
-/** Filmes/séries → proxy; canais /live/ → URL absoluta direta (sem /api/proxy). */
+/** Reprodução direta no painel (sem /api/proxy). */
 function proxyPlaybackUrl(url) {
   const trimmed = (url || "").trim();
-  if (!trimmed || isXtreamLiveStreamUrl(trimmed)) return trimmed;
+  if (!trimmed) return trimmed;
   return window.SlimFlixAuth?.wrapUrlForProxy?.(trimmed) || trimmed;
 }
 
@@ -419,16 +497,15 @@ function createHlsConfig() {
     enableWorker: true,
     lowLatencyMode: true,
   };
-  if (typeof window.SlimFlixAuth?.wrapUrlForProxy === "function") {
-    config.xhrSetup = (xhr, requestUrl) => {
-      xhr.open("GET", proxyPlaybackUrl(requestUrl), true);
-    };
-  }
+  config.xhrSetup = (xhr, requestUrl) => {
+    xhr.open("GET", proxyPlaybackUrl(requestUrl), true);
+  };
   return config;
 }
 
 function resetVideoElement(videoEl) {
   if (!videoEl) return;
+  if (videoEl === channelsVideo) destroyVideoJs();
   destroyHls();
   destroyMpegts();
   videoEl.pause();
@@ -522,8 +599,142 @@ function startMpegtsPlayback(videoEl, url, entry, titleEl, playbackToken) {
 }
 
 /**
- * Canal ao vivo: URL absoluta http:// do painel no <video> (sem proxy, sem Hls.js).
- * Em erro (mixed content / rede), tenta https:// na mesma URL.
+ * Canal ao vivo via Video.js (VHS): .ts (video/mp2t) + fallback .m3u8 (HLS) em HTTP direto.
+ */
+function attachLiveChannelWithVideoJs(videoEl, titleEl, url, entry, playbackToken = null) {
+  if (!videoEl || !url) return;
+  if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+  if (typeof videojs === "undefined") {
+    attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken);
+    return;
+  }
+
+  destroyHls();
+  destroyMpegts();
+  destroyVideoJs();
+
+  if (videoEl === channelsVideo) {
+    prepareChannelsVideoElement();
+  }
+
+  videoEl.classList.add("video-js", "vjs-default-skin");
+  videoEl.setAttribute("crossorigin", "anonymous");
+  videoEl.crossOrigin = "anonymous";
+
+  const absoluteBase = toAbsoluteLiveStreamUrl(url);
+  const httpBase = liveStreamUrlWithProtocol(absoluteBase, "http");
+  let httpsBase = liveStreamUrlWithProtocol(absoluteBase, "https");
+  try {
+    const httpsParsed = new URL(httpsBase);
+    httpsParsed.searchParams.set("slimflix_tls", "1");
+    httpsBase = httpsParsed.href;
+  } catch {
+    /* mantém httpsBase */
+  }
+
+  let triedHttps = false;
+
+  const bindChannelWatchers = (player) => {
+    const onReady = () => {
+      if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+      if (titleEl && entry?.name) {
+        titleEl.textContent = entry.name || entry.label || "Canal";
+      }
+      const techVideo = getVideoJsTechVideo(videoEl);
+      applyChannelSafePlaybackOffset(techVideo);
+      if (videoEl === channelsVideo) {
+        startChannelStallWatcher(techVideo, playbackToken);
+      }
+    };
+    player.one("loadeddata", onReady);
+    player.one("playing", onReady);
+  };
+
+  const startVideoJs = (baseUrl, protocolLabel) => {
+    if (playbackToken != null && playbackToken !== channelPlaybackToken) return null;
+
+    try {
+      const existing = videojs.getPlayer(videoEl);
+      if (existing && !existing.isDisposed()) existing.dispose();
+    } catch {
+      /* ignore */
+    }
+
+    const sources = buildLiveVideoJsSources(baseUrl);
+    console.info("[Slimflix] Canal Video.js (HTTP direto):", {
+      canal: entry?.name,
+      protocol: protocolLabel,
+      sources,
+    });
+
+    const player = videojs(
+      videoEl,
+      {
+        controls: true,
+        autoplay: true,
+        preload: "auto",
+        fluid: false,
+        fill: true,
+        liveui: true,
+        playsinline: true,
+        responsive: false,
+        sources,
+        html5: {
+          vhs: {
+            overrideNative: !videojs.browser.IS_ANY_SAFARI,
+            enableLowInitialPlaylist: true,
+            smoothQualityChange: true,
+          },
+        },
+      },
+      function onPlayerReady() {
+        if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+        this.play().catch(() => {});
+      }
+    );
+
+    activeVideoJs = player;
+    bindChannelWatchers(player);
+    return player;
+  };
+
+  const onFinalError = (player) => {
+    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+    const err = player?.error?.();
+    console.error("[Slimflix] Canal Video.js indisponível:", {
+      canal: entry?.name,
+      http: httpBase,
+      https: httpsBase,
+      code: err?.code,
+      message: err?.message,
+    });
+    if (titleEl) {
+      titleEl.textContent = `Erro ao carregar: ${entry?.name || "canal"}`;
+    }
+  };
+
+  const player = startVideoJs(httpBase, "http");
+  if (!player) return;
+
+  player.on("error", () => {
+    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+
+    if (!triedHttps) {
+      triedHttps = true;
+      console.info("[Slimflix] Canal Video.js: fallback HTTP → HTTPS");
+      destroyVideoJs();
+      const httpsPlayer = startVideoJs(httpsBase, "https");
+      if (httpsPlayer) {
+        httpsPlayer.one("error", () => onFinalError(httpsPlayer));
+      }
+      return;
+    }
+    onFinalError(player);
+  });
+}
+
+/**
+ * Fallback sem Video.js: <video> nativo HTTP → HTTPS.
  */
 function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = null) {
   if (!videoEl || !url) return;
@@ -644,7 +855,11 @@ function attachStreamToVideo(videoEl, titleEl, url, entry, options = {}) {
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
   if (live) {
-    attachLiveChannelDirect(videoEl, titleEl, trimmed, entry, playbackToken);
+    if (shouldUseVideoJsForLive(trimmed)) {
+      attachLiveChannelWithVideoJs(videoEl, titleEl, trimmed, entry, playbackToken);
+    } else {
+      attachLiveChannelDirect(videoEl, titleEl, trimmed, entry, playbackToken);
+    }
     return;
   }
 
@@ -742,7 +957,7 @@ function updateChannelsListActiveState() {
 
 function playChannelInline(entry) {
   if (!entry?.url || !channelsVideo) return;
-  if (canalReproduzindoUrl === entry.url && (activeMpegts || activeHls)) return;
+  if (canalReproduzindoUrl === entry.url && (activeMpegts || activeHls || activeVideoJs)) return;
 
   canalAtivo = entry;
   if (channelsNowTitle) {
@@ -2179,7 +2394,10 @@ if (typeof window !== "undefined") {
 }
 
 channelsFullscreenBtn?.addEventListener("click", async () => {
-  const target = channelsPlayerScreen || channelsVideo;
+  const target =
+    activeVideoJs && typeof activeVideoJs.isDisposed === "function" && !activeVideoJs.isDisposed()
+      ? activeVideoJs.el()
+      : channelsPlayerScreen || channelsVideo;
   if (!target) return;
   try {
     if (document.fullscreenElement) await document.exitFullscreen();

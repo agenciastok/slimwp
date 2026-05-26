@@ -24,7 +24,7 @@
     return categoryMap.get(String(categoryId)) || fallbackPrefix || "Sem categoria";
   }
 
-  /** URL bruta Xtream; na reprodução o player aplica /api/proxy (SSL + CORS no servidor). */
+  /** URL bruta Xtream — reprodução direta no painel (HTTP na VPS). */
   function buildLiveStreamUrl(server, username, password, streamId) {
     return `${server}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.ts`;
   }

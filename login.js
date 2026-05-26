@@ -133,7 +133,7 @@
 
   function formatFetchError(err) {
     if (err?.name === "TypeError" && /fetch|network|Failed/i.test(String(err.message))) {
-      return "Erro de rede ao contatar o painel IPTV (proxy ou servidor indisponível).";
+      return "Erro de rede ao contatar o painel IPTV (servidor indisponível ou bloqueio CORS).";
     }
     return err?.message || "Erro desconhecido na API Xtream.";
   }
@@ -158,9 +158,23 @@
     return false;
   }
 
-  /** Rota Vercel serverless — evita CORS no browser. */
+  /** Desembrulha URLs antigas salvas com /api/proxy?url=... */
+  function unwrapLegacyProxyUrl(targetUrl) {
+    if (!targetUrl || typeof targetUrl !== "string") return targetUrl;
+    const trimmed = targetUrl.trim();
+    if (!trimmed.startsWith("/api/proxy")) return trimmed;
+    try {
+      const parsed = new URL(trimmed, window.location.origin);
+      const upstream = parsed.searchParams.get("url");
+      return upstream ? decodeURIComponent(upstream) : trimmed;
+    } catch {
+      return trimmed;
+    }
+  }
+
+  /** Compatibilidade: retorna a URL direta do painel (sem proxy). */
   function buildProxyUrl(targetUrl) {
-    return `/api/proxy?url=${encodeURIComponent(targetUrl)}`;
+    return unwrapLegacyProxyUrl(targetUrl);
   }
 
   function isXtreamLiveStreamUrl(targetUrl) {
@@ -174,42 +188,16 @@
   }
 
   /**
-   * Proxy só para API JSON (login, categorias, catálogo). Streams /live/ ficam diretos no player.
+   * Requisições diretas ao painel Xtream (VPS/nginx estático — sem /api/proxy).
    */
   function wrapUrlForProxy(targetUrl) {
-    if (!targetUrl || typeof targetUrl !== "string") return targetUrl;
-    const trimmed = targetUrl.trim();
-    if (trimmed.startsWith("/api/proxy")) return trimmed;
-    if (isXtreamLiveStreamUrl(trimmed)) return trimmed;
-    try {
-      const parsed = new URL(trimmed, window.location.origin);
-      if (!["http:", "https:"].includes(parsed.protocol)) return targetUrl;
-      if (!isAllowedUpstreamHost(parsed.hostname)) return targetUrl;
-      return buildProxyUrl(parsed.href);
-    } catch {
-      return targetUrl;
-    }
+    return unwrapLegacyProxyUrl(targetUrl);
   }
 
-  /**
-   * GET na Xtream API via proxy (/api/proxy). Em localhost sem Vercel, tenta fetch direto.
-   */
+  /** GET direto em player_api.php e demais endpoints do painel. */
   async function fetchXtreamUrl(targetUrl) {
-    const proxyUrl = buildProxyUrl(targetUrl);
-    let response;
-
-    try {
-      response = await fetch(proxyUrl, { method: "GET", credentials: "same-origin" });
-    } catch (proxyErr) {
-      console.warn("[SlimFlix Xtream] Proxy indisponível, tentando origem direta:", proxyErr);
-      response = await fetch(targetUrl, { method: "GET" });
-    }
-
-    if (!response.ok && response.status === 404 && /localhost|127\.0\.0\.1/.test(window.location.hostname)) {
-      response = await fetch(targetUrl, { method: "GET" });
-    }
-
-    return response;
+    const url = unwrapLegacyProxyUrl(targetUrl);
+    return fetch(url, { method: "GET" });
   }
 
   function normalizeServerUrl(raw) {
@@ -358,7 +346,7 @@
       return {
         ok: false,
         message:
-          "Falha na conexão com o servidor. Verifique IPTV_SERVER ou se o proxy /api/proxy está ativo na Vercel.",
+          "Falha na conexão com o servidor. Verifique IPTV_SERVER em login.js e se o painel está acessível.",
       };
     }
 
