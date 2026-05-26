@@ -367,17 +367,11 @@ function isXtreamLiveStreamUrl(url) {
   return /\/live\//i.test(url || "");
 }
 
-/** VOD/filmes/séries → proxy; canais /live/ nunca passam pelo proxy. */
-function proxyStreamUrl(url, entry) {
+/** Toda reprodução e segmento HLS passam pelo proxy (/api/proxy). */
+function proxyPlaybackUrl(url) {
   const trimmed = (url || "").trim();
   if (!trimmed) return trimmed;
-  if (isCanal(entry) || isXtreamLiveStreamUrl(trimmed)) return trimmed;
   return window.SlimFlixAuth?.wrapUrlForProxy?.(trimmed) || trimmed;
-}
-
-/** http:// → https:// no stream ao vivo (painel com TLS nativo). */
-function forceLiveStreamHttps(url) {
-  return (url || "").trim().replace(/^http:\/\//i, "https://");
 }
 
 /**
@@ -400,9 +394,9 @@ function ensureLiveTsUrl(url) {
   }
 }
 
-/** URL final do canal: .ts + https:// direto no <video> (sem proxy, sem Hls.js). */
-function buildLiveChannelVideoUrl(originalUrl) {
-  return forceLiveStreamHttps(ensureLiveTsUrl(originalUrl));
+/** Canal ao vivo: .ts original → proxy (SSL resolvido no servidor). */
+function buildLiveChannelPlaybackUrl(originalUrl) {
+  return proxyPlaybackUrl(ensureLiveTsUrl(originalUrl));
 }
 
 function createHlsConfig() {
@@ -412,7 +406,7 @@ function createHlsConfig() {
   };
   if (typeof window.SlimFlixAuth?.wrapUrlForProxy === "function") {
     config.xhrSetup = (xhr, requestUrl) => {
-      xhr.open("GET", proxyStreamUrl(requestUrl), true);
+      xhr.open("GET", proxyPlaybackUrl(requestUrl), true);
     };
   }
   return config;
@@ -513,7 +507,7 @@ function startMpegtsPlayback(videoEl, url, entry, titleEl, playbackToken) {
 }
 
 /**
- * Canal ao vivo: stream .ts em HTTPS direto no <video> (sem proxy, sem Hls.js, sem mpegts.js).
+ * Canal ao vivo: .ts via proxy no <video> — sem Hls.js (evita converter para m3u8).
  */
 function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = null) {
   if (!videoEl || !url) return;
@@ -526,7 +520,7 @@ function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = n
     prepareChannelsVideoElement();
   }
 
-  const streamSrc = buildLiveChannelVideoUrl(url);
+  const streamSrc = buildLiveChannelPlaybackUrl(url);
 
   videoEl.src = streamSrc;
   videoEl.load();
@@ -547,7 +541,7 @@ function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = n
   videoEl.addEventListener(
     "error",
     () => {
-      console.error("[Slimflix] Erro no canal (src direto):", {
+      console.error("[Slimflix] Erro no canal (proxy):", {
         canal: entry?.name,
         src: streamSrc,
         code: videoEl.error?.code,
@@ -599,8 +593,8 @@ function attachStreamToVideo(videoEl, titleEl, url, entry, options = {}) {
     return;
   }
 
-  const streamUrl = proxyStreamUrl(trimmed, entry);
-  const useHls = needsHlsPlayback(streamUrl, entry);
+  const streamUrl = proxyPlaybackUrl(trimmed);
+  const useHls = needsHlsPlayback(trimmed, entry);
 
   if (useHls && typeof Hls !== "undefined" && Hls.isSupported()) {
     startHlsPlayback(streamUrl, entry, trimmed, videoEl, titleEl, playbackToken);
@@ -645,10 +639,10 @@ function openPlayer(entry) {
   resetPlayerElement();
   attachStreamToPlayer(entry.url, entry);
   if (isCanal(entry)) {
-    console.info("[Slimflix] Reproduzindo canal (HTTPS direto no vídeo):", {
+    console.info("[Slimflix] Reproduzindo canal (via proxy):", {
       nome: entry.name,
       urlOriginal: entry.url,
-      urlVideo: buildLiveChannelVideoUrl(entry.url),
+      urlVideo: buildLiveChannelPlaybackUrl(entry.url),
     });
   }
 
@@ -707,11 +701,11 @@ function playChannelInline(entry) {
   canalReproduzindoUrl = entry.url;
   attachStreamToChannelsPlayer(entry.url, entry, playbackToken);
 
-  console.info("[Slimflix] Reproduzindo canal (guia, HTTPS direto):", {
+  console.info("[Slimflix] Reproduzindo canal (guia, via proxy):", {
     nome: entry.name,
     pasta: pastaCanalAtiva,
     urlOriginal: entry.url,
-    urlVideo: buildLiveChannelVideoUrl(entry.url),
+    urlVideo: buildLiveChannelPlaybackUrl(entry.url),
   });
 }
 

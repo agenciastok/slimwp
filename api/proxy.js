@@ -1,10 +1,12 @@
 /**
- * SlimFlix — proxy universal (Vercel) para API Xtream e streams (/live, /movie, /series).
- * GET /api/proxy?url=<URL completa codificada>
+ * SlimFlix — proxy universal (Vercel) com pipe em streaming.
+ * Contorna CORS, Mixed Content e certificado SSL inválido do painel IPTV.
+ * GET /api/proxy?url=<URL codificada>
  */
 
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
+const { Agent, fetch: undiciFetch } = require("undici");
 
 const ALLOWED_HOSTS = (process.env.ALLOWED_IPTV_HOSTS || "spacetg.shop")
   .split(",")
@@ -30,11 +32,24 @@ const FORWARD_RESPONSE_HEADERS = [
   "content-disposition",
 ];
 
+/** Aceita certificado autoassinado / inválido do servidor IPTV. */
+const insecureDispatcher = new Agent({
+  connect: { rejectUnauthorized: false },
+  bodyTimeout: 0,
+  headersTimeout: 120_000,
+});
+
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Range, Content-Type, Accept, If-Range, If-Modified-Since");
-  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, Content-Type");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Range, Content-Type, Accept, If-Range, If-Modified-Since"
+  );
+  res.setHeader(
+    "Access-Control-Expose-Headers",
+    "Content-Length, Content-Range, Accept-Ranges, Content-Type"
+  );
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
@@ -72,6 +87,24 @@ function forwardResponseHeaders(upstream, res) {
   }
 }
 
+function fetchUpstream(targetUrl, init) {
+  return undiciFetch(targetUrl, {
+    ...init,
+    dispatcher: insecureDispatcher,
+    redirect: "follow",
+  });
+}
+
+async function pipeUpstreamToResponse(upstream, res) {
+  if (!upstream.body) {
+    res.end();
+    return;
+  }
+
+  const nodeStream = Readable.fromWeb(upstream.body);
+  await pipeline(nodeStream, res);
+}
+
 module.exports = async function handler(req, res) {
   setCorsHeaders(res);
 
@@ -97,27 +130,21 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    const upstream = await fetch(targetUrl, {
+    const upstream = await fetchUpstream(targetUrl, {
       method: req.method,
       headers: buildUpstreamHeaders(req),
-      redirect: "follow",
     });
 
     res.status(upstream.status);
     forwardResponseHeaders(upstream, res);
+    res.setHeader("Cache-Control", "no-store");
 
     if (req.method === "HEAD") {
       res.end();
       return;
     }
 
-    if (!upstream.body) {
-      res.end();
-      return;
-    }
-
-    const nodeStream = Readable.fromWeb(upstream.body);
-    await pipeline(nodeStream, res);
+    await pipeUpstreamToResponse(upstream, res);
   } catch (err) {
     console.error("[SlimFlix proxy]", err);
     if (!res.headersSent) {
@@ -126,7 +153,11 @@ module.exports = async function handler(req, res) {
         message: err?.message || "Unknown error",
       });
     } else {
-      res.end();
+      try {
+        res.end();
+      } catch {
+        /* response already closed */
+      }
     }
   }
 };

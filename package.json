@@ -1,0 +1,7 @@
+{
+  "name": "slimflix-website",
+  "private": true,
+  "dependencies": {
+    "undici": "^6.21.0"
+  }
+}
