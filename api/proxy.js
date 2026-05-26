@@ -105,7 +105,7 @@ async function pipeUpstreamToResponse(upstream, res) {
   await pipeline(nodeStream, res);
 }
 
-module.exports = async function handler(req, res) {
+async function handler(req, res) {
   setCorsHeaders(res);
 
   if (req.method === "OPTIONS") {
@@ -160,4 +160,10 @@ module.exports = async function handler(req, res) {
       }
     }
   }
+}
+
+handler.config = {
+  maxDuration: 60,
 };
+
+module.exports = handler;
