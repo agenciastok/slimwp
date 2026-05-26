@@ -174,12 +174,13 @@
   }
 
   /**
-   * Encapsula qualquer URL do painel (API, /live/, /movie/, /series/) no proxy Vercel.
+   * Proxy só para API JSON (login, categorias, catálogo). Streams /live/ ficam diretos no player.
    */
   function wrapUrlForProxy(targetUrl) {
     if (!targetUrl || typeof targetUrl !== "string") return targetUrl;
     const trimmed = targetUrl.trim();
     if (trimmed.startsWith("/api/proxy")) return trimmed;
+    if (isXtreamLiveStreamUrl(trimmed)) return trimmed;
     try {
       const parsed = new URL(trimmed, window.location.origin);
       if (!["http:", "https:"].includes(parsed.protocol)) return targetUrl;
