@@ -148,11 +148,37 @@ function destroyMpegts() {
   destroyMpegtsPlayerInstance(playerInstancia);
 }
 
+function getActiveChannelsVideoJsPlayer() {
+  if (activeVideoJs && typeof activeVideoJs.isDisposed === "function" && !activeVideoJs.isDisposed()) {
+    return activeVideoJs;
+  }
+  if (typeof videojs !== "undefined" && channelsVideo) {
+    try {
+      const existing = videojs.getPlayer(channelsVideo);
+      if (existing && typeof existing.isDisposed === "function" && !existing.isDisposed()) {
+        return existing;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return null;
+}
+
 function destroyVideoJs() {
-  if (!activeVideoJs) return;
+  const player = activeVideoJs || getActiveChannelsVideoJsPlayer();
+  if (!player) {
+    activeVideoJs = null;
+    return;
+  }
   try {
-    if (typeof activeVideoJs.isDisposed === "function" && !activeVideoJs.isDisposed()) {
-      activeVideoJs.dispose();
+    if (typeof player.pause === "function") player.pause();
+  } catch {
+    /* ignore */
+  }
+  try {
+    if (typeof player.isDisposed === "function" && !player.isDisposed()) {
+      player.dispose();
     }
   } catch {
     /* ignore */
@@ -160,6 +186,94 @@ function destroyVideoJs() {
   activeVideoJs = null;
   if (channelsVideo) {
     channelsVideo.classList.add("video-js", "vjs-default-skin", "channels-player__video");
+  }
+}
+
+/** Elemento <video> real (Video.js envelopa o nó original). */
+function resolveNativeVideoElement(videoEl) {
+  if (!videoEl) return null;
+
+  if (videoEl === channelsVideo) {
+    const player = getActiveChannelsVideoJsPlayer();
+    if (player && typeof player.tech === "function") {
+      try {
+        const tech = player.tech(true);
+        if (tech?.el && typeof tech.el().pause === "function") return tech.el();
+      } catch {
+        /* ignore */
+      }
+    }
+    if (typeof channelsVideo.pause === "function") return channelsVideo;
+    const nested = channelsVideo.querySelector?.("video");
+    if (nested && typeof nested.pause === "function") return nested;
+    return null;
+  }
+
+  if (typeof videoEl.pause === "function") return videoEl;
+  const nested = videoEl.querySelector?.("video");
+  if (nested && typeof nested.pause === "function") return nested;
+  return null;
+}
+
+function safePauseVideoElement(videoEl) {
+  if (!videoEl) return;
+  try {
+    if (videoEl === channelsVideo) {
+      const player = getActiveChannelsVideoJsPlayer();
+      if (player && typeof player.pause === "function") {
+        player.pause();
+        return;
+      }
+    }
+    const native = resolveNativeVideoElement(videoEl);
+    if (native && typeof native.pause === "function") native.pause();
+  } catch {
+    /* ignore */
+  }
+}
+
+function safePlayVideoElement(videoEl) {
+  if (!videoEl) return Promise.resolve();
+  try {
+    if (videoEl === channelsVideo) {
+      const player = getActiveChannelsVideoJsPlayer();
+      if (player && typeof player.play === "function") {
+        return Promise.resolve(player.play()).catch(() => {});
+      }
+    }
+    const native = resolveNativeVideoElement(videoEl);
+    if (native && typeof native.play === "function") {
+      return native.play().catch(() => {});
+    }
+  } catch {
+    /* ignore */
+  }
+  return Promise.resolve();
+}
+
+function safeLoadVideoElement(videoEl) {
+  if (!videoEl) return;
+  try {
+    const native = resolveNativeVideoElement(videoEl) || videoEl;
+    if (native && typeof native.load === "function") native.load();
+  } catch {
+    /* ignore */
+  }
+}
+
+function safeResetChannelsVideoElement() {
+  safePauseVideoElement(channelsVideo);
+  const native = resolveNativeVideoElement(channelsVideo);
+  const target = native || channelsVideo;
+  if (!target) return;
+  try {
+    if (target.removeAttribute) {
+      target.removeAttribute("src");
+      target.removeAttribute("srcObject");
+    }
+    safeLoadVideoElement(channelsVideo);
+  } catch {
+    /* ignore */
   }
 }
 
@@ -212,15 +326,10 @@ function buildLiveVideoJsSources(baseUrl) {
 }
 
 function getVideoJsTechVideo(fallbackEl) {
-  if (activeVideoJs && typeof activeVideoJs.tech === "function") {
-    try {
-      const tech = activeVideoJs.tech(true);
-      if (tech?.el) return tech.el();
-    } catch {
-      /* ignore */
-    }
+  if (fallbackEl === channelsVideo) {
+    return resolveNativeVideoElement(channelsVideo) || fallbackEl;
   }
-  return fallbackEl;
+  return resolveNativeVideoElement(fallbackEl) || fallbackEl;
 }
 
 function prepareChannelsVideoElement() {
@@ -252,17 +361,18 @@ function clearChannelPlayDelay() {
 
 /** Inicia ~4–5s atrás da borda do buffer para margem de segurança ao vivo. */
 function applyChannelSafePlaybackOffset(videoEl) {
-  if (!videoEl?.buffered || videoEl.buffered.length === 0) return false;
+  const native = resolveNativeVideoElement(videoEl) || videoEl;
+  if (!native?.buffered || native.buffered.length === 0) return false;
 
-  const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
-  const bufferedStart = videoEl.buffered.start(0);
+  const bufferedEnd = native.buffered.end(native.buffered.length - 1);
+  const bufferedStart = native.buffered.start(0);
   const target = Math.max(
     bufferedStart,
     bufferedEnd - CHANNEL_INITIAL_PLAYBACK_OFFSET_SEC
   );
 
   try {
-    videoEl.currentTime = target;
+    native.currentTime = target;
     return true;
   } catch {
     return false;
@@ -282,10 +392,10 @@ function scheduleMpegtsDelayedPlay(playerInstancia, videoEl, entry, titleEl, pla
 
   try {
     playerInstancia.pause();
-    videoEl.pause();
   } catch {
     /* ignore */
   }
+  safePauseVideoElement(videoEl);
 
   const startedAt = Date.now();
 
@@ -296,10 +406,10 @@ function scheduleMpegtsDelayedPlay(playerInstancia, videoEl, entry, titleEl, pla
 
     try {
       playerInstancia.play();
-      videoEl.play().catch(() => {});
     } catch (err) {
       console.warn("[Slimflix MPEG-TS] Falha ao iniciar após buffer:", err);
     }
+    safePlayVideoElement(videoEl);
 
     if (titleEl && entry) {
       titleEl.textContent = entry.name || entry.label || "Canal";
@@ -339,23 +449,24 @@ function scheduleMpegtsDelayedPlay(playerInstancia, videoEl, entry, titleEl, pla
 /** Salta para a borda ao vivo se o buffer acumular atraso excessivo. */
 function startChannelStallWatcher(videoEl, playbackToken) {
   clearChannelStallWatcher();
-  if (!videoEl) return;
+  const native = resolveNativeVideoElement(videoEl) || videoEl;
+  if (!native) return;
 
   channelStallWatchId = setInterval(() => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) {
       clearChannelStallWatcher();
       return;
     }
-    if (videoEl.paused || videoEl.readyState < 2) return;
-    if (!videoEl.buffered || videoEl.buffered.length === 0) return;
+    if (native.paused || native.readyState < 2) return;
+    if (!native.buffered || native.buffered.length === 0) return;
 
-    const bufferedEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
-    const lag = bufferedEnd - videoEl.currentTime;
+    const bufferedEnd = native.buffered.end(native.buffered.length - 1);
+    const lag = bufferedEnd - native.currentTime;
 
     if (lag > CHANNEL_STALL_MAX_LAG_SEC) {
       const target = Math.max(0, bufferedEnd - CHANNEL_LIVE_EDGE_OFFSET_SEC);
       try {
-        videoEl.currentTime = target;
+        native.currentTime = target;
       } catch {
         /* seek na borda ao vivo pode falhar em alguns browsers */
       }
@@ -368,18 +479,10 @@ function teardownChannelPlayer() {
   clearChannelStallWatcher();
   destroyHls();
   destroyMpegts();
+  safePauseVideoElement(channelsVideo);
   destroyVideoJs();
   canalReproduzindoUrl = null;
-
-  if (!channelsVideo) return;
-  channelsVideo.pause();
-  channelsVideo.removeAttribute("src");
-  channelsVideo.removeAttribute("srcObject");
-  try {
-    channelsVideo.load();
-  } catch {
-    /* ignore */
-  }
+  safeResetChannelsVideoElement();
 }
 
 function isRawTsStreamUrl(url) {
@@ -508,9 +611,17 @@ function resetVideoElement(videoEl) {
   if (videoEl === channelsVideo) destroyVideoJs();
   destroyHls();
   destroyMpegts();
-  videoEl.pause();
-  videoEl.removeAttribute("src");
-  videoEl.load();
+  safePauseVideoElement(videoEl);
+  const native = resolveNativeVideoElement(videoEl) || videoEl;
+  try {
+    if (native?.removeAttribute) {
+      native.removeAttribute("src");
+      native.removeAttribute("srcObject");
+    }
+  } catch {
+    /* ignore */
+  }
+  safeLoadVideoElement(videoEl);
 }
 
 function resetPlayerElement() {
@@ -765,20 +876,22 @@ function attachLiveChannelDirect(videoEl, titleEl, url, entry, playbackToken = n
 
   const bindLoaded = () => {
     if (videoEl !== channelsVideo || playbackToken !== channelPlaybackToken) return;
+    const native = resolveNativeVideoElement(videoEl) || videoEl;
     const onReady = () => {
       if (playbackToken !== channelPlaybackToken) return;
       applyChannelSafePlaybackOffset(videoEl);
       startChannelStallWatcher(videoEl, playbackToken);
     };
-    if (videoEl.readyState >= 2) onReady();
-    else videoEl.addEventListener("loadeddata", onReady, { once: true });
+    if (native?.readyState >= 2) onReady();
+    else if (native?.addEventListener) native.addEventListener("loadeddata", onReady, { once: true });
   };
 
   const playAbsoluteUrl = (src) => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    videoEl.src = src;
-    videoEl.load();
-    videoEl.play().catch(() => {});
+    const native = resolveNativeVideoElement(videoEl) || videoEl;
+    if (native) native.src = src;
+    safeLoadVideoElement(videoEl);
+    safePlayVideoElement(videoEl);
     if (videoEl === channelsVideo) bindLoaded();
   };
 
