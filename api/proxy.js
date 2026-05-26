@@ -1,17 +1,40 @@
 /**
- * SlimFlix — proxy serverless (Vercel) para contornar CORS na Xtream API.
- * Uso: GET /api/proxy?url=<URL codificada do player_api.php>
+ * SlimFlix — proxy universal (Vercel) para API Xtream e streams (/live, /movie, /series).
+ * GET /api/proxy?url=<URL completa codificada>
  */
+
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 
 const ALLOWED_HOSTS = (process.env.ALLOWED_IPTV_HOSTS || "spacetg.shop")
   .split(",")
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);
 
+const FORWARD_REQUEST_HEADERS = [
+  "range",
+  "if-range",
+  "if-modified-since",
+  "accept",
+  "accept-language",
+];
+
+const FORWARD_RESPONSE_HEADERS = [
+  "content-type",
+  "content-length",
+  "content-range",
+  "accept-ranges",
+  "cache-control",
+  "etag",
+  "last-modified",
+  "content-disposition",
+];
+
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Range, Content-Type, Accept, If-Range, If-Modified-Since");
+  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, Content-Type");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
@@ -27,10 +50,26 @@ function isAllowedTargetUrl(urlString) {
   } catch {
     return false;
   }
-  if (!["http:", "https:"].includes(parsed.protocol)) return false;
-  if (!isHostAllowed(parsed.hostname)) return false;
-  const path = parsed.pathname.toLowerCase();
-  return path.endsWith("/player_api.php");
+  return ["http:", "https:"].includes(parsed.protocol) && isHostAllowed(parsed.hostname);
+}
+
+function buildUpstreamHeaders(req) {
+  const headers = {
+    "User-Agent": "SlimFlix-Vercel-Proxy/1.0",
+    Accept: req.headers.accept || "*/*",
+  };
+  for (const name of FORWARD_REQUEST_HEADERS) {
+    const value = req.headers[name];
+    if (value) headers[name] = value;
+  }
+  return headers;
+}
+
+function forwardResponseHeaders(upstream, res) {
+  for (const name of FORWARD_RESPONSE_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value) res.setHeader(name, value);
+  }
 }
 
 module.exports = async function handler(req, res) {
@@ -41,7 +80,7 @@ module.exports = async function handler(req, res) {
     return;
   }
 
-  if (req.method !== "GET") {
+  if (req.method !== "GET" && req.method !== "HEAD") {
     res.status(405).json({ error: "Method not allowed" });
     return;
   }
@@ -53,30 +92,41 @@ module.exports = async function handler(req, res) {
   }
 
   if (!isAllowedTargetUrl(targetUrl)) {
-    res.status(403).json({ error: "URL not allowed by proxy policy" });
+    res.status(403).json({ error: "Host not allowed by proxy policy" });
     return;
   }
 
   try {
     const upstream = await fetch(targetUrl, {
-      method: "GET",
-      headers: {
-        Accept: "application/json, text/plain, */*",
-        "User-Agent": "SlimFlix-Vercel-Proxy/1.0",
-      },
+      method: req.method,
+      headers: buildUpstreamHeaders(req),
+      redirect: "follow",
     });
-
-    const contentType = upstream.headers.get("content-type") || "application/json";
-    const body = Buffer.from(await upstream.arrayBuffer());
 
     res.status(upstream.status);
-    res.setHeader("Content-Type", contentType);
-    res.end(body);
+    forwardResponseHeaders(upstream, res);
+
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+
+    const nodeStream = Readable.fromWeb(upstream.body);
+    await pipeline(nodeStream, res);
   } catch (err) {
     console.error("[SlimFlix proxy]", err);
-    res.status(502).json({
-      error: "Upstream fetch failed",
-      message: err?.message || "Unknown error",
-    });
+    if (!res.headersSent) {
+      res.status(502).json({
+        error: "Upstream fetch failed",
+        message: err?.message || "Unknown error",
+      });
+    } else {
+      res.end();
+    }
   }
 };

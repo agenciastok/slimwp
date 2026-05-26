@@ -360,6 +360,32 @@ function needsHlsPlayback(url, entry) {
   return false;
 }
 
+/** Encaminha URLs do painel IPTV pelo proxy Vercel (/api/proxy). */
+function proxyStreamUrl(url) {
+  return window.SlimFlixAuth?.wrapUrlForProxy?.(url) || url;
+}
+
+function createHlsConfig(isChannelsPlayer = false) {
+  const config = {
+    enableWorker: true,
+    lowLatencyMode: true,
+    ...(isChannelsPlayer
+      ? {
+          backBufferLength: 0,
+          maxBufferLength: 6,
+          maxMaxBufferLength: 10,
+          liveSyncDurationCount: 2,
+        }
+      : {}),
+  };
+  if (typeof window.SlimFlixAuth?.wrapUrlForProxy === "function") {
+    config.xhrSetup = (xhr, requestUrl) => {
+      xhr.open("GET", proxyStreamUrl(requestUrl), true);
+    };
+  }
+  return config;
+}
+
 function resetVideoElement(videoEl) {
   if (!videoEl) return;
   destroyHls();
@@ -459,18 +485,7 @@ function startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playb
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
   const isChannelsPlayer = videoEl === channelsVideo;
-  activeHls = new Hls({
-    enableWorker: true,
-    lowLatencyMode: true,
-    ...(isChannelsPlayer
-      ? {
-          backBufferLength: 0,
-          maxBufferLength: 6,
-          maxMaxBufferLength: 10,
-          liveSyncDurationCount: 2,
-        }
-      : {}),
-  });
+  activeHls = new Hls(createHlsConfig(isChannelsPlayer));
 
   let triedFallback = false;
 
@@ -506,18 +521,7 @@ function startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playb
           fallback,
         });
         activeHls.destroy();
-        activeHls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: true,
-          ...(isChannelsPlayer
-            ? {
-                backBufferLength: 0,
-                maxBufferLength: 6,
-                maxMaxBufferLength: 10,
-                liveSyncDurationCount: 2,
-              }
-            : {}),
-        });
+        activeHls = new Hls(createHlsConfig(isChannelsPlayer));
         activeHls.on(Hls.Events.MANIFEST_PARSED, () => {
           if (isChannelsPlayer && playbackToken === channelPlaybackToken) {
             const startWithOffset = () => {
@@ -538,7 +542,7 @@ function startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playb
             titleEl.textContent = `Erro ao carregar: ${entry?.name || "canal"}`;
           }
         });
-        tryLoad(fallback);
+        tryLoad(proxyStreamUrl(fallback));
         return;
       }
     }
@@ -555,19 +559,22 @@ function attachStreamToVideo(videoEl, titleEl, url, entry, options = {}) {
   if (!videoEl || !url) return;
 
   const { preferMpegts = false, playbackToken = null } = options;
-  const originalUrl = url;
+  const originalUrl = url.trim();
 
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  if (preferMpegts && isCanal(entry) && isRawTsStreamUrl(url)) {
-    if (startMpegtsPlayback(videoEl, url, entry, titleEl, playbackToken)) return;
+  if (preferMpegts && isCanal(entry) && isRawTsStreamUrl(originalUrl)) {
+    if (startMpegtsPlayback(videoEl, proxyStreamUrl(originalUrl), entry, titleEl, playbackToken)) {
+      return;
+    }
     destroyMpegts();
   }
 
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  const streamUrl = normalizeChannelStreamUrl(url, entry);
-  const useHls = needsHlsPlayback(streamUrl, entry);
+  const normalizedUrl = normalizeChannelStreamUrl(originalUrl, entry);
+  const streamUrl = proxyStreamUrl(normalizedUrl);
+  const useHls = needsHlsPlayback(normalizedUrl, entry);
 
   if (useHls && typeof Hls !== "undefined" && Hls.isSupported()) {
     startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playbackToken);

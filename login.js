@@ -138,9 +138,47 @@
     return err?.message || "Erro desconhecido na API Xtream.";
   }
 
+  const DEFAULT_ALLOWED_HOSTS = ["spacetg.shop"];
+
+  function getSessionServerHost() {
+    try {
+      const server = normalizeServerUrl(getStoredSession().server || IPTV_SERVER);
+      return new URL(server).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  }
+
+  function isAllowedUpstreamHost(hostname) {
+    const host = String(hostname || "").toLowerCase();
+    const hosts = new Set([...DEFAULT_ALLOWED_HOSTS, getSessionServerHost()].filter(Boolean));
+    for (const allowed of hosts) {
+      if (host === allowed || host.endsWith(`.${allowed}`)) return true;
+    }
+    return false;
+  }
+
   /** Rota Vercel serverless — evita CORS no browser. */
   function buildProxyUrl(targetUrl) {
     return `/api/proxy?url=${encodeURIComponent(targetUrl)}`;
+  }
+
+  /**
+   * Encapsula URL do painel IPTV (API, live, movie, series, HLS) no proxy.
+   * URLs externas ou já proxied não são alteradas.
+   */
+  function wrapUrlForProxy(targetUrl) {
+    if (!targetUrl || typeof targetUrl !== "string") return targetUrl;
+    const trimmed = targetUrl.trim();
+    if (trimmed.startsWith("/api/proxy")) return trimmed;
+    try {
+      const parsed = new URL(trimmed, window.location.origin);
+      if (!["http:", "https:"].includes(parsed.protocol)) return targetUrl;
+      if (!isAllowedUpstreamHost(parsed.hostname)) return targetUrl;
+      return buildProxyUrl(parsed.href);
+    } catch {
+      return targetUrl;
+    }
   }
 
   /**
@@ -701,6 +739,8 @@
     enforceGuestOnlyUI,
     parseStoredSession,
     buildProxyUrl,
+    wrapUrlForProxy,
+    isAllowedUpstreamHost,
     fetchXtreamUrl,
     authenticateXtream,
     getLoginCredentials,

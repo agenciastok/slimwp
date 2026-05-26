@@ -3,7 +3,7 @@
   "trailingSlash": false,
   "functions": {
     "api/proxy.js": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   },
   "headers": [
