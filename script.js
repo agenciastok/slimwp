@@ -80,30 +80,11 @@ let activeSeason = 1;
 let savedScrollY = 0;
 let renderGeneration = 0;
 let activeHls = null;
-let activeMpegts = null;
-let activeVideoJs = null;
-let channelVjsErrorHandled = false;
 let channelPlaybackToken = 0;
 let canalReproduzindoUrl = null;
-let channelStallWatchId = null;
-let channelPlayDelayTimer = null;
 
-/** Margem de atraso permitida antes do watchdog corrigir (compatível com stash buffer). */
-const CHANNEL_STALL_MAX_LAG_SEC = 22;
-const CHANNEL_LIVE_EDGE_OFFSET_SEC = 4.5;
-const CHANNEL_INITIAL_PLAYBACK_OFFSET_SEC = 4.5;
-const CHANNEL_STASH_PLAY_DELAY_MS = 3000;
-const CHANNEL_MIN_BUFFER_BEFORE_PLAY_SEC = 4;
-
-const MPEGTS_LIVE_CONFIG = {
-  enableWorker: true,
-  enableStashBuffer: true,
-  stashInitialSize: 1024 * 1024 * 3,
-  liveBufferLatencyChasing: false,
-  autoCleanupSourceBuffer: true,
-  autoCleanupMaxBackwardDuration: 5,
-  autoCleanupMinBackwardDuration: 2,
-};
+/** Instância global do mpegts.js para canais ao vivo (.ts). */
+window.mpegtsPlayer = window.mpegtsPlayer || null;
 
 /* ─── Scroll navbar ─── */
 window.addEventListener("scroll", () => {
@@ -118,239 +99,14 @@ function destroyHls() {
   }
 }
 
-function destroyMpegtsPlayerInstance(playerInstancia) {
-  if (!playerInstancia) return;
-  try {
-    playerInstancia.pause();
-  } catch {
-    /* ignore */
-  }
-  try {
-    playerInstancia.unload();
-  } catch {
-    /* ignore */
-  }
-  try {
-    playerInstancia.detachMediaElement();
-  } catch {
-    /* ignore */
-  }
-  try {
-    playerInstancia.destroy();
-  } catch {
-    /* ignore */
-  }
-}
-
 function destroyMpegts() {
-  if (!activeMpegts) return;
-  const playerInstancia = activeMpegts;
-  activeMpegts = null;
-  destroyMpegtsPlayerInstance(playerInstancia);
-}
-
-function getActiveChannelsVideoJsPlayer() {
-  if (activeVideoJs && typeof activeVideoJs.isDisposed === "function" && !activeVideoJs.isDisposed()) {
-    return activeVideoJs;
-  }
-  if (typeof videojs !== "undefined" && channelsVideo) {
-    try {
-      const existing = videojs.getPlayer(channelsVideo);
-      if (existing && typeof existing.isDisposed === "function" && !existing.isDisposed()) {
-        return existing;
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-  return null;
-}
-
-function isVideoJsPlayerAlive(player) {
-  return player && typeof player.isDisposed === "function" && !player.isDisposed();
-}
-
-function clearVideoJsPlayerError(player) {
-  if (!isVideoJsPlayerAlive(player)) return;
+  if (!window.mpegtsPlayer) return;
   try {
-    if (typeof player.error === "function") player.error(null);
+    window.mpegtsPlayer.destroy();
   } catch {
     /* ignore */
   }
-}
-
-function safeVideoJsPause(player) {
-  if (!isVideoJsPlayerAlive(player)) return;
-  try {
-    if (typeof player.pause === "function") player.pause();
-  } catch {
-    /* ignore */
-  }
-}
-
-function destroyVideoJs() {
-  const player = activeVideoJs || getActiveChannelsVideoJsPlayer();
-  if (!player) {
-    activeVideoJs = null;
-    channelVjsErrorHandled = false;
-    return;
-  }
-  safeVideoJsPause(player);
-  clearVideoJsPlayerError(player);
-  try {
-    if (isVideoJsPlayerAlive(player)) player.dispose();
-  } catch {
-    /* ignore */
-  }
-  activeVideoJs = null;
-  channelVjsErrorHandled = false;
-  if (channelsVideo) {
-    channelsVideo.classList.add("video-js", "vjs-default-skin", "channels-player__video");
-  }
-}
-
-/**
- * Tag <video> pura no DOM — mpegts.js exige HTMLVideoElement com .play().
- * Sempre busca no DOM (Video.js pode mover o id para um wrapper).
- */
-function getChannelsNativeVideoElement() {
-  const screen = document.getElementById("channels-player-screen");
-  if (screen) {
-    const byId = screen.querySelector("video#channels-video");
-    if (byId?.tagName === "VIDEO" && typeof byId.play === "function") return byId;
-    const anyVideo = screen.querySelector("video");
-    if (anyVideo?.tagName === "VIDEO" && typeof anyVideo.play === "function") return anyVideo;
-  }
-
-  const root = document.getElementById("channels-video");
-  if (root?.tagName === "VIDEO" && typeof root.play === "function") return root;
-  if (root?.querySelector) {
-    const nested = root.querySelector("video");
-    if (nested?.tagName === "VIDEO" && typeof nested.play === "function") return nested;
-  }
-
-  if (channelsVideo?.tagName === "VIDEO" && typeof channelsVideo.play === "function") {
-    return channelsVideo;
-  }
-
-  return null;
-}
-
-/** Destrói Video.js e deixa o <video> nativo pronto para mpegts.js. */
-function prepareChannelsVideoForMpegts() {
-  destroyVideoJs();
-
-  const native = getChannelsNativeVideoElement();
-  if (!native) return null;
-
-  native.classList.remove("vjs-tech", "vjs-hidden", "video-js", "vjs-default-skin");
-  native.classList.add("channels-player__video");
-  if (!native.id) native.id = "channels-video";
-
-  native.playsInline = true;
-  native.setAttribute("playsinline", "");
-  native.setAttribute("webkit-playsinline", "");
-  native.setAttribute("crossorigin", "anonymous");
-  native.crossOrigin = "anonymous";
-  native.preload = "auto";
-  native.style.transform = "translateZ(0)";
-  native.style.backfaceVisibility = "hidden";
-
-  return native;
-}
-
-/** Elemento <video> real (Video.js envelopa o nó original). */
-function resolveNativeVideoElement(videoEl) {
-  if (!videoEl) return null;
-
-  if (videoEl === channelsVideo || videoEl?.id === "channels-video") {
-    const fromDom = getChannelsNativeVideoElement();
-    if (fromDom) return fromDom;
-
-    const player = getActiveChannelsVideoJsPlayer();
-    if (player && typeof player.tech === "function") {
-      try {
-        const tech = player.tech(true);
-        if (tech?.el && typeof tech.el().pause === "function") return tech.el();
-      } catch {
-        /* ignore */
-      }
-    }
-    return null;
-  }
-
-  if (typeof videoEl.pause === "function") return videoEl;
-  const nested = videoEl.querySelector?.("video");
-  if (nested && typeof nested.pause === "function") return nested;
-  return null;
-}
-
-function safePauseVideoElement(videoEl) {
-  if (!videoEl) return;
-  try {
-    if (videoEl === channelsVideo) {
-      const player = getActiveChannelsVideoJsPlayer();
-      if (player && typeof player.pause === "function") {
-        player.pause();
-        return;
-      }
-    }
-    const native = resolveNativeVideoElement(videoEl);
-    if (native && typeof native.pause === "function") native.pause();
-  } catch {
-    /* ignore */
-  }
-}
-
-function safePlayVideoElement(videoEl) {
-  if (!videoEl) return Promise.resolve();
-  try {
-    if (videoEl === channelsVideo) {
-      const player = getActiveChannelsVideoJsPlayer();
-      if (player && typeof player.play === "function") {
-        return Promise.resolve(player.play()).catch(() => {});
-      }
-    }
-    const native = resolveNativeVideoElement(videoEl);
-    if (native && typeof native.play === "function") {
-      return native.play().catch(() => {});
-    }
-  } catch {
-    /* ignore */
-  }
-  return Promise.resolve();
-}
-
-function safeLoadVideoElement(videoEl) {
-  if (!videoEl) return;
-  try {
-    const native = resolveNativeVideoElement(videoEl) || videoEl;
-    if (native && typeof native.load === "function") native.load();
-  } catch {
-    /* ignore */
-  }
-}
-
-function safeResetChannelsVideoElement() {
-  const player = getActiveChannelsVideoJsPlayer();
-  if (player) {
-    safeVideoJsPause(player);
-    clearVideoJsPlayerError(player);
-    return;
-  }
-  safePauseVideoElement(channelsVideo);
-  const native = resolveNativeVideoElement(channelsVideo);
-  const target = native || channelsVideo;
-  if (!target) return;
-  try {
-    if (target.removeAttribute) {
-      target.removeAttribute("src");
-      target.removeAttribute("srcObject");
-    }
-    safeLoadVideoElement(channelsVideo);
-  } catch {
-    /* ignore */
-  }
+  window.mpegtsPlayer = null;
 }
 
 /**
@@ -388,15 +144,6 @@ function isLiveHlsUrl(streamUrl) {
   return (streamUrl || "").toLowerCase().includes(".m3u8");
 }
 
-/** MIME para Video.js — HLS explícito; .ts não usa mp2t (evita MEDIA_ERR_SRC_NOT_SUPPORTED). */
-function getVideoJsLiveSource(streamUrl) {
-  const src = enforceHttpStreamUrl(streamUrl);
-  if (isLiveHlsUrl(src)) {
-    return { src, type: "application/x-mpegURL" };
-  }
-  return { src, type: "" };
-}
-
 function showLiveChannelUnavailable(titleEl, entry, extra = {}) {
   console.error("[Slimflix] Canal indisponível:", {
     canal: entry?.name,
@@ -405,329 +152,138 @@ function showLiveChannelUnavailable(titleEl, entry, extra = {}) {
   if (titleEl) titleEl.textContent = "Canal indisponível";
 }
 
-function handleVideoJsChannelError(player, titleEl, entry, playbackToken) {
-  if (channelVjsErrorHandled) return;
-  if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-  channelVjsErrorHandled = true;
-
-  safeVideoJsPause(player);
-  clearVideoJsPlayerError(player);
-  showLiveChannelUnavailable(titleEl, entry);
+function prepareChannelsVideoElement() {
+  const videoElement = document.getElementById("channels-video");
+  if (!videoElement) return null;
+  videoElement.classList.add("channels-player__video");
+  videoElement.playsInline = true;
+  videoElement.setAttribute("playsinline", "");
+  videoElement.setAttribute("crossorigin", "anonymous");
+  videoElement.crossOrigin = "anonymous";
+  videoElement.preload = "auto";
+  return videoElement;
 }
 
-function loadVideoJsLiveSource(player, streamUrl, playbackToken) {
-  if (!isVideoJsPlayerAlive(player) || channelVjsErrorHandled) return;
+function teardownChannelPlayer() {
+  destroyHls();
+  destroyMpegts();
+  canalReproduzindoUrl = null;
+
+  const videoElement = document.getElementById("channels-video");
+  if (!videoElement) return;
+  try {
+    videoElement.pause();
+  } catch {
+    /* ignore */
+  }
+  try {
+    videoElement.removeAttribute("src");
+    videoElement.removeAttribute("srcObject");
+  } catch {
+    /* ignore */
+  }
+}
+
+function playLiveChannelHls(videoElement, streamUrl, entry, playbackToken) {
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  clearVideoJsPlayerError(player);
-  const source = getVideoJsLiveSource(streamUrl);
+  destroyMpegts();
+  activeHls = new Hls(createHlsConfig());
+  activeHls.loadSource(streamUrl);
+  activeHls.attachMedia(videoElement);
 
-  try {
-    player.src({ src: source.src, type: source.type });
-  } catch (err) {
-    console.error("[Slimflix] Video.js player.src():", err, source);
-    handleVideoJsChannelError(player, channelsNowTitle, null, playbackToken);
-    return;
-  }
-
-  player.one("loadeddata", () => {
-    if (channelVjsErrorHandled) return;
+  activeHls.on(Hls.Events.MANIFEST_PARSED, () => {
     if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    if (!isVideoJsPlayerAlive(player)) return;
-    clearVideoJsPlayerError(player);
-    try {
-      const playPromise = player.play();
-      if (playPromise && typeof playPromise.catch === "function") {
-        playPromise.catch(() => {});
-      }
-    } catch {
-      /* ignore — erro será tratado pelo listener 'error' */
+    videoElement.play().catch(() => {});
+    if (channelsNowTitle && entry?.name) {
+      channelsNowTitle.textContent = entry.name;
     }
+  });
+
+  activeHls.on(Hls.Events.ERROR, (_event, data) => {
+    if (!data?.fatal) return;
+    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
+    try {
+      videoElement.pause();
+    } catch {
+      /* ignore */
+    }
+    destroyHls();
+    showLiveChannelUnavailable(channelsNowTitle, entry, { url: streamUrl });
   });
 }
 
 /**
- * Reprodução de canal ao vivo — HTTP apenas, sem fallback de protocolo nem loops de erro.
+ * Canal ao vivo: <video id="channels-video"> + mpegts.js (HTTP, sem Video.js).
  */
 function playLiveChannel(entry, playbackToken) {
-  if (!entry?.url || !channelsVideo) return;
+  if (!entry?.url) return;
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  channelVjsErrorHandled = false;
-  const streamUrl = enforceHttpStreamUrl(buildXtreamLiveStreamUrl(entry, entry.url));
+  const urlDoCanal = enforceHttpStreamUrl(buildXtreamLiveStreamUrl(entry, entry.url));
+  const videoElement = document.getElementById("channels-video");
 
-  destroyHls();
-  destroyMpegts();
-  destroyVideoJs();
-
-  if (channelsNowTitle && entry.name) {
-    channelsNowTitle.textContent = entry.name || entry.label || "Canal";
-  }
-
-  console.info("[Slimflix] Canal:", {
-    nome: entry.name,
-    url: streamUrl,
-    hls: isLiveHlsUrl(streamUrl),
-  });
-
-  if (!isLiveHlsUrl(streamUrl) && typeof mpegts !== "undefined" && mpegts.isSupported()) {
-    const ok = startMpegtsPlayback(null, streamUrl, entry, channelsNowTitle, playbackToken);
-    if (ok) return;
-  }
-
-  if (typeof videojs === "undefined") {
-    playLiveChannelNative(entry, streamUrl, playbackToken);
+  if (!videoElement) {
+    showLiveChannelUnavailable(channelsNowTitle, entry);
     return;
   }
 
   prepareChannelsVideoElement();
 
-  try {
-    const existing = videojs.getPlayer(channelsVideo);
-    if (existing && !existing.isDisposed()) existing.dispose();
-  } catch {
-    /* ignore */
+  if (channelsNowTitle && entry.name) {
+    channelsNowTitle.textContent = entry.name || entry.label || "Canal";
   }
 
-  channelsVideo.classList.add("video-js", "vjs-default-skin");
-  channelsVideo.setAttribute("crossorigin", "anonymous");
+  console.info("[Slimflix] Canal:", { nome: entry.name, url: urlDoCanal });
 
-  const player = videojs(channelsVideo, {
-    controls: true,
-    autoplay: false,
-    preload: "auto",
-    fluid: false,
-    fill: true,
-    liveui: true,
-    playsinline: true,
-    html5: {
-      vhs: {
-        overrideNative: !videojs.browser.IS_ANY_SAFARI,
-      },
-    },
-  });
-
-  activeVideoJs = player;
-
-  player.one("error", () => {
-    handleVideoJsChannelError(player, channelsNowTitle, entry, playbackToken);
-  });
-
-  player.one("loadedmetadata", () => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    if (channelVjsErrorHandled) return;
-    const techVideo = getVideoJsTechVideo(channelsVideo);
-    if (techVideo) startChannelStallWatcher(techVideo, playbackToken);
-  });
-
-  loadVideoJsLiveSource(player, streamUrl, playbackToken);
-}
-
-function playLiveChannelNative(entry, streamUrl, playbackToken) {
-  const native = prepareChannelsVideoForMpegts() || getChannelsNativeVideoElement();
-  if (!native || typeof native.play !== "function") return;
-
-  native.setAttribute("crossorigin", "anonymous");
-  native.setAttribute("src", streamUrl);
-
-  native.addEventListener(
-    "error",
-    () => {
-      if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-      safePauseVideoElement(channelsVideo);
-      showLiveChannelUnavailable(channelsNowTitle, entry, { url: streamUrl });
-    },
-    { once: true }
-  );
-
-  try {
-    native.load();
-    const p = native.play();
-    if (p && typeof p.catch === "function") p.catch(() => {});
-  } catch {
-    showLiveChannelUnavailable(channelsNowTitle, entry);
+  destroyHls();
+  if (window.mpegtsPlayer) {
+    window.mpegtsPlayer.destroy();
+    window.mpegtsPlayer = null;
   }
-}
+  destroyMpegts();
 
-function getVideoJsTechVideo(fallbackEl) {
-  if (fallbackEl === channelsVideo || fallbackEl?.id === "channels-video") {
-    return getChannelsNativeVideoElement() || resolveNativeVideoElement(fallbackEl) || fallbackEl;
-  }
-  return resolveNativeVideoElement(fallbackEl) || fallbackEl;
-}
-
-function prepareChannelsVideoElement() {
-  if (!channelsVideo) return;
-  channelsVideo.classList.add("video-js", "vjs-default-skin", "channels-player__video");
-  channelsVideo.playsInline = true;
-  channelsVideo.setAttribute("playsinline", "");
-  channelsVideo.setAttribute("webkit-playsinline", "");
-  channelsVideo.setAttribute("crossorigin", "anonymous");
-  channelsVideo.crossOrigin = "anonymous";
-  channelsVideo.preload = "auto";
-  channelsVideo.style.transform = "translateZ(0)";
-  channelsVideo.style.backfaceVisibility = "hidden";
-}
-
-function clearChannelStallWatcher() {
-  if (channelStallWatchId != null) {
-    clearInterval(channelStallWatchId);
-    channelStallWatchId = null;
-  }
-}
-
-function clearChannelPlayDelay() {
-  if (channelPlayDelayTimer != null) {
-    clearTimeout(channelPlayDelayTimer);
-    channelPlayDelayTimer = null;
-  }
-}
-
-/** Inicia ~4–5s atrás da borda do buffer para margem de segurança ao vivo. */
-function applyChannelSafePlaybackOffset(videoEl) {
-  const native = resolveNativeVideoElement(videoEl) || videoEl;
-  if (!native?.buffered || native.buffered.length === 0) return false;
-
-  const bufferedEnd = native.buffered.end(native.buffered.length - 1);
-  const bufferedStart = native.buffered.start(0);
-  const target = Math.max(
-    bufferedStart,
-    bufferedEnd - CHANNEL_INITIAL_PLAYBACK_OFFSET_SEC
-  );
-
-  try {
-    native.currentTime = target;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Aguarda stash/buffer inicial (~3MB ou 3s) antes de iniciar o play.
- * Mantém o player pausado enquanto os dados chegam do servidor.
- */
-function scheduleMpegtsDelayedPlay(playerInstancia, videoEl, entry, titleEl, playbackToken) {
-  clearChannelPlayDelay();
-
-  const nativeVideo =
-    videoEl?.tagName === "VIDEO" && typeof videoEl.play === "function"
-      ? videoEl
-      : getChannelsNativeVideoElement();
-
-  if (!nativeVideo || typeof nativeVideo.play !== "function") {
-    console.error("[Slimflix] MPEG-TS: elemento <video> nativo inválido em beginPlayback/waitForBuffer");
-    showLiveChannelUnavailable(titleEl, entry);
+  if (isLiveHlsUrl(urlDoCanal)) {
+    playLiveChannelHls(videoElement, urlDoCanal, entry, playbackToken);
     return;
   }
 
-  if (titleEl) {
-    titleEl.textContent = "Preparando buffer…";
+  if (typeof mpegts === "undefined") {
+    showLiveChannelUnavailable(channelsNowTitle, entry, { url: urlDoCanal });
+    return;
+  }
+
+  const features = mpegts.getFeatureList?.() || {};
+  if (!features.mseLivePlayback) {
+    showLiveChannelUnavailable(channelsNowTitle, entry, { url: urlDoCanal });
+    return;
   }
 
   try {
-    playerInstancia.pause();
-  } catch {
-    /* ignore */
-  }
-  try {
-    nativeVideo.pause();
-  } catch {
-    /* ignore */
-  }
+    window.mpegtsPlayer = mpegts.createPlayer({
+      type: "mse",
+      isLive: true,
+      url: urlDoCanal,
+    });
+    window.mpegtsPlayer.attachMediaElement(videoElement);
+    window.mpegtsPlayer.load();
+    window.mpegtsPlayer.play().catch((e) => console.log("Erro no play:", e));
 
-  const startedAt = Date.now();
-
-  const beginPlayback = () => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-
-    applyChannelSafePlaybackOffset(nativeVideo);
-
-    try {
-      playerInstancia.play();
-    } catch (err) {
-      console.warn("[Slimflix MPEG-TS] Falha ao iniciar playerInstancia.play():", err);
-    }
-
-    try {
-      const playPromise = nativeVideo.play();
-      if (playPromise && typeof playPromise.catch === "function") {
-        playPromise.catch(() => {});
-      }
-    } catch (err) {
-      console.warn("[Slimflix MPEG-TS] Falha em nativeVideo.play():", err);
-    }
-
-    if (titleEl && entry) {
-      titleEl.textContent = entry.name || entry.label || "Canal";
-    }
-
-    startChannelStallWatcher(nativeVideo, playbackToken);
-  };
-
-  const waitForBuffer = () => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-
-    let bufferedAhead = 0;
-    if (nativeVideo.buffered && nativeVideo.buffered.length > 0) {
-      const end = nativeVideo.buffered.end(nativeVideo.buffered.length - 1);
-      const start = nativeVideo.buffered.start(0);
-      bufferedAhead = end - Math.max(nativeVideo.currentTime, start);
-    }
-
-    const elapsed = Date.now() - startedAt;
-    const bufferReady = bufferedAhead >= CHANNEL_MIN_BUFFER_BEFORE_PLAY_SEC;
-    const delayElapsed = elapsed >= CHANNEL_STASH_PLAY_DELAY_MS;
-
-    if (bufferReady || delayElapsed) {
-      clearChannelPlayDelay();
-      beginPlayback();
-      return;
-    }
-
-    channelPlayDelayTimer = setTimeout(waitForBuffer, 250);
-  };
-
-  channelPlayDelayTimer = setTimeout(waitForBuffer, 500);
-}
-
-/** Salta para a borda ao vivo se o buffer acumular atraso excessivo. */
-function startChannelStallWatcher(videoEl, playbackToken) {
-  clearChannelStallWatcher();
-  const native = resolveNativeVideoElement(videoEl) || videoEl;
-  if (!native) return;
-
-  channelStallWatchId = setInterval(() => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) {
-      clearChannelStallWatcher();
-      return;
-    }
-    if (native.paused || native.readyState < 2) return;
-    if (!native.buffered || native.buffered.length === 0) return;
-
-    const bufferedEnd = native.buffered.end(native.buffered.length - 1);
-    const lag = bufferedEnd - native.currentTime;
-
-    if (lag > CHANNEL_STALL_MAX_LAG_SEC) {
-      const target = Math.max(0, bufferedEnd - CHANNEL_LIVE_EDGE_OFFSET_SEC);
+    window.mpegtsPlayer.on(mpegts.Events.ERROR, () => {
+      if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
       try {
-        native.currentTime = target;
+        videoElement.pause();
       } catch {
-        /* seek na borda ao vivo pode falhar em alguns browsers */
+        /* ignore */
       }
-    }
-  }, 400);
-}
-
-function teardownChannelPlayer() {
-  clearChannelPlayDelay();
-  clearChannelStallWatcher();
-  destroyHls();
-  destroyMpegts();
-  safePauseVideoElement(channelsVideo);
-  destroyVideoJs();
-  canalReproduzindoUrl = null;
-  safeResetChannelsVideoElement();
+      destroyMpegts();
+      showLiveChannelUnavailable(channelsNowTitle, entry, { url: urlDoCanal });
+    });
+  } catch (err) {
+    console.error("[Slimflix] MPEG-TS:", err);
+    destroyMpegts();
+    showLiveChannelUnavailable(channelsNowTitle, entry, { url: urlDoCanal });
+  }
 }
 
 function isRawTsStreamUrl(url) {
@@ -780,7 +336,7 @@ function getChannelStreamFallbackUrl(url) {
 
 function needsHlsPlayback(url, entry) {
   const lower = (url || "").toLowerCase();
-  if (isCanal(entry)) return true;
+  if (isCanal(entry) && entry?.type === "channel" && abaAtiva === "channels") return false;
   if (/\.m3u8(?:\?|$)/i.test(lower)) return true;
   if (/\.ts(?:\?|$)/i.test(lower)) return true;
   if (/output=(?:ts|mpegts|m3u8)/i.test(lower)) return true;
@@ -856,20 +412,19 @@ function createHlsConfig() {
 
 function resetVideoElement(videoEl) {
   if (!videoEl) return;
-  if (videoEl === channelsVideo) destroyVideoJs();
+  if (videoEl === channelsVideo || videoEl?.id === "channels-video") {
+    teardownChannelPlayer();
+    return;
+  }
   destroyHls();
-  destroyMpegts();
-  safePauseVideoElement(videoEl);
-  const native = resolveNativeVideoElement(videoEl) || videoEl;
   try {
-    if (native?.removeAttribute) {
-      native.removeAttribute("src");
-      native.removeAttribute("srcObject");
-    }
+    videoEl.pause();
+    videoEl.removeAttribute("src");
+    videoEl.removeAttribute("srcObject");
+    videoEl.load();
   } catch {
     /* ignore */
   }
-  safeLoadVideoElement(videoEl);
 }
 
 function resetPlayerElement() {
@@ -892,75 +447,6 @@ function logHlsError(url, entry, data) {
     context: data?.context,
     data,
   });
-}
-
-function startMpegtsPlayback(_videoEl, url, entry, titleEl, playbackToken) {
-  if (typeof mpegts === "undefined" || !mpegts.isSupported()) return false;
-  if (playbackToken != null && playbackToken !== channelPlaybackToken) return false;
-
-  destroyHls();
-  destroyMpegts();
-
-  const nativeVideo = prepareChannelsVideoForMpegts();
-  if (!nativeVideo) {
-    console.error("[Slimflix] MPEG-TS: #channels-video <video> nativo não encontrado no DOM");
-    showLiveChannelUnavailable(titleEl, entry);
-    return false;
-  }
-
-  let playerInstancia = null;
-  try {
-    playerInstancia = mpegts.createPlayer(
-      {
-        type: "mse",
-        isLive: true,
-        url: url.trim(),
-      },
-      MPEGTS_LIVE_CONFIG
-    );
-  } catch (err) {
-    console.error("[Slimflix MPEG-TS] Falha ao criar player:", err);
-    return false;
-  }
-
-  if (playbackToken != null && playbackToken !== channelPlaybackToken) {
-    destroyMpegtsPlayerInstance(playerInstancia);
-    return false;
-  }
-
-  activeMpegts = playerInstancia;
-
-  playerInstancia.on(mpegts.Events.ERROR, (_type, detail) => {
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-    try {
-      nativeVideo.pause();
-    } catch {
-      /* ignore */
-    }
-    showLiveChannelUnavailable(titleEl, entry, { url, detail });
-  });
-
-  if (mpegts.Events.LOADING_COMPLETE) {
-    playerInstancia.on(mpegts.Events.LOADING_COMPLETE, () => {
-      if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
-      if (nativeVideo.paused) applyChannelSafePlaybackOffset(nativeVideo);
-    });
-  }
-
-  try {
-    playerInstancia.attachMediaElement(nativeVideo);
-    playerInstancia.load();
-    if (playbackToken != null && playbackToken !== channelPlaybackToken) {
-      destroyMpegts();
-      return false;
-    }
-    scheduleMpegtsDelayedPlay(playerInstancia, nativeVideo, entry, titleEl, playbackToken);
-    return true;
-  } catch (err) {
-    console.error("[Slimflix MPEG-TS] Falha ao iniciar:", err);
-    destroyMpegts();
-    return false;
-  }
 }
 
 function startHlsPlayback(streamUrl, entry, originalUrl, videoEl, titleEl, playbackToken) {
@@ -1096,7 +582,7 @@ function updateChannelsListActiveState() {
 
 function playChannelInline(entry) {
   if (!entry?.url || !channelsVideo) return;
-  if (canalReproduzindoUrl === entry.url && (activeMpegts || activeHls || activeVideoJs)) return;
+  if (canalReproduzindoUrl === entry.url && (window.mpegtsPlayer || activeHls)) return;
 
   canalAtivo = entry;
   updateChannelsListActiveState();
@@ -2521,10 +2007,7 @@ if (typeof window !== "undefined") {
 }
 
 channelsFullscreenBtn?.addEventListener("click", async () => {
-  const target =
-    activeVideoJs && typeof activeVideoJs.isDisposed === "function" && !activeVideoJs.isDisposed()
-      ? activeVideoJs.el()
-      : channelsPlayerScreen || channelsVideo;
+  const target = channelsPlayerScreen || document.getElementById("channels-video");
   if (!target) return;
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
