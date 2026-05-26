@@ -163,14 +163,26 @@
     return `/api/proxy?url=${encodeURIComponent(targetUrl)}`;
   }
 
+  /** Fluxos ao vivo (/live/) não passam pelo proxy — evita timeout em serverless. */
+  function isXtreamLiveStreamUrl(targetUrl) {
+    if (!targetUrl || typeof targetUrl !== "string") return false;
+    try {
+      const path = new URL(targetUrl.trim()).pathname.toLowerCase();
+      return /\/live\//.test(path);
+    } catch {
+      return /\/live\//i.test(targetUrl);
+    }
+  }
+
   /**
-   * Encapsula URL do painel IPTV (API, live, movie, series, HLS) no proxy.
-   * URLs externas ou já proxied não são alteradas.
+   * Encapsula URL do painel IPTV no proxy (API, movie, series, VOD).
+   * Canais /live/ ficam com URL direta no player.
    */
   function wrapUrlForProxy(targetUrl) {
     if (!targetUrl || typeof targetUrl !== "string") return targetUrl;
     const trimmed = targetUrl.trim();
     if (trimmed.startsWith("/api/proxy")) return trimmed;
+    if (isXtreamLiveStreamUrl(trimmed)) return trimmed;
     try {
       const parsed = new URL(trimmed, window.location.origin);
       if (!["http:", "https:"].includes(parsed.protocol)) return targetUrl;
@@ -740,6 +752,7 @@
     parseStoredSession,
     buildProxyUrl,
     wrapUrlForProxy,
+    isXtreamLiveStreamUrl,
     isAllowedUpstreamHost,
     fetchXtreamUrl,
     authenticateXtream,
