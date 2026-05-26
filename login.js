@@ -2,10 +2,15 @@
  * SlimFlix — autenticação Xtream Codes API e navegação SPA (login ↔ player)
  */
 (function () {
-  /** Altere para a URL do seu painel Xtream (sem barra no final). */
-  const IPTV_SERVER = "http://spacetg.shop";
+  /** Altere a lista de painéis Xtream (failover em cascata no login). */
+  const IPTV_SERVERS = [
+    "http://spacetg.shop",
+    "http://premiumcp.online",
+    "http://cdn.conectp.cloud",
+  ];
 
   const STORAGE_SESSION = "slimflix_session";
+  const STORAGE_ACTIVE_SERVER = "active_iptv_server";
   const STORAGE_USER = "slimflix_user";
   const STORAGE_AUTH = "slimflix_xtream_auth";
   const STORAGE_USER_LEGACY = "slimflix_xtream_username";
@@ -84,7 +89,6 @@
   const userInput = document.getElementById("xtream-user");
   const passInput = document.getElementById("xtream-password");
   const togglePasswordBtn = document.getElementById("toggle-password");
-  const devBypassBtn = document.getElementById("dev-bypass-btn");
   const loginError = document.getElementById("login-error");
   const logoutBtn = document.getElementById("btn-logout");
   const playerApiAlert = document.getElementById("player-api-alert");
@@ -138,11 +142,11 @@
     return err?.message || "Erro desconhecido na API Xtream.";
   }
 
-  const DEFAULT_ALLOWED_HOSTS = ["spacetg.shop"];
+  let DEFAULT_ALLOWED_HOSTS = [];
 
   function getSessionServerHost() {
     try {
-      const server = normalizeServerUrl(getStoredSession().server || IPTV_SERVER);
+      const server = normalizeServerUrl(getStoredSession().server);
       return new URL(server).hostname.toLowerCase();
     } catch {
       return "";
@@ -207,25 +211,43 @@
     return url.replace(/\/+$/, "");
   }
 
+  DEFAULT_ALLOWED_HOSTS = IPTV_SERVERS.map((raw) => {
+    try {
+      return new URL(normalizeServerUrl(raw)).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  }).filter(Boolean);
+
+  function getActiveIptvServer() {
+    const stored = localStorage.getItem(STORAGE_ACTIVE_SERVER);
+    if (stored) return normalizeServerUrl(stored);
+
+    const parsed = parseStoredSession();
+    if (parsed?.server) return normalizeServerUrl(parsed.server);
+
+    return "";
+  }
+
   function getLoginCredentials() {
     return {
-      server: normalizeServerUrl(IPTV_SERVER),
       username: (userInput?.value || "").trim(),
       password: passInput?.value || "",
     };
   }
 
   function getStoredSession() {
+    const activeServer = getActiveIptvServer();
     const parsed = parseStoredSession();
     if (parsed) {
       return {
-        server: normalizeServerUrl(parsed.server || IPTV_SERVER),
+        server: normalizeServerUrl(parsed.server || activeServer),
         username: parsed.username,
         password: parsed.password,
       };
     }
     return {
-      server: normalizeServerUrl(IPTV_SERVER),
+      server: activeServer,
       username:
         localStorage.getItem(STORAGE_USER) ||
         localStorage.getItem(STORAGE_USER_LEGACY) ||
@@ -238,12 +260,13 @@
     return hasActiveSession();
   }
 
-  function saveXtreamSession(username, password, apiPayload) {
+  function saveXtreamSession(username, password, apiPayload, serverUrl) {
     const userInfo = normalizeUserInfo(apiPayload);
-    const server = normalizeServerUrl(IPTV_SERVER);
+    const server = normalizeServerUrl(serverUrl);
     localStorage.setItem(STORAGE_USER, username);
     localStorage.setItem(STORAGE_PASS, password);
     localStorage.setItem(STORAGE_USER_LEGACY, username);
+    localStorage.setItem(STORAGE_ACTIVE_SERVER, server);
     localStorage.setItem(
       STORAGE_SESSION,
       JSON.stringify({
@@ -264,6 +287,7 @@
 
   function clearXtreamSession() {
     localStorage.removeItem(STORAGE_SESSION);
+    localStorage.removeItem(STORAGE_ACTIVE_SERVER);
     localStorage.removeItem(STORAGE_USER);
     localStorage.removeItem(STORAGE_AUTH);
     localStorage.removeItem(STORAGE_USER_LEGACY);
@@ -284,8 +308,14 @@
     return status === "active";
   }
 
+  function isXtreamAuthValid(userInfo) {
+    if (!userInfo) return false;
+    const auth = userInfo.auth;
+    return auth === 1 || auth === "1";
+  }
+
   function buildPlayerApiUrl(username, password, action, extraParams = {}, serverBase) {
-    const base = normalizeServerUrl(serverBase || IPTV_SERVER);
+    const base = normalizeServerUrl(serverBase || getActiveIptvServer());
     const params = new URLSearchParams({
       username,
       password,
@@ -317,57 +347,54 @@
   }
 
   /**
-   * Autenticação Xtream Codes API via player_api.php
+   * Autenticação Xtream Codes API — tenta cada servidor em IPTV_SERVERS até auth válido.
    */
   async function authenticateXtream(credentials) {
-    const { server, username, password } = credentials;
+    const { username, password } = credentials;
 
-    if (!server || server.includes("seu-painel-iptv")) {
+    if (!username || !password) {
+      return { ok: false, message: "Preencha usuário e senha." };
+    }
+
+    if (!IPTV_SERVERS.length) {
       return {
         ok: false,
-        message: "Configure IPTV_SERVER em login.js com a URL do seu painel.",
+        message: "Configure IPTV_SERVERS em login.js com as URLs dos painéis.",
       };
     }
 
-    const url = buildPlayerApiUrl(username, password, undefined, {}, server);
+    for (const serverCandidate of IPTV_SERVERS) {
+      const server = normalizeServerUrl(serverCandidate);
+      if (!server || server.includes("seu-painel-iptv")) continue;
 
-    let data;
-    try {
-      const response = await fetchXtreamUrl(url);
-      if (!response.ok) {
-        return {
-          ok: false,
-          message: `Não foi possível conectar ao servidor (${response.status}).`,
-        };
+      const url = buildPlayerApiUrl(username, password, undefined, {}, server);
+
+      try {
+        const response = await fetchXtreamUrl(url);
+        if (!response.ok) continue;
+
+        const data = await response.json();
+        const userInfo = normalizeUserInfo(data);
+
+        console.log("[SlimFlix Xtream] Tentativa de login:", {
+          server,
+          username,
+          user_info: userInfo,
+          server_info: data?.server_info,
+        });
+
+        if (!isXtreamAuthValid(userInfo)) continue;
+
+        saveXtreamSession(username, password, data, server);
+        console.info("[SlimFlix Xtream] Login OK no servidor:", server);
+
+        return { ok: true, userInfo, serverInfo: data?.server_info, server };
+      } catch (err) {
+        console.warn("[SlimFlix Xtream] Servidor indisponível:", server, err);
       }
-      data = await response.json();
-    } catch (err) {
-      console.error("[SlimFlix Xtream] Erro de rede:", err);
-      return {
-        ok: false,
-        message:
-          "Falha na conexão com o servidor. Verifique IPTV_SERVER em login.js e se o painel está acessível.",
-      };
     }
 
-    const userInfo = normalizeUserInfo(data);
-
-    console.log("[SlimFlix Xtream] Resposta de autenticação:", {
-      username,
-      user_info: userInfo,
-      server_info: data?.server_info,
-    });
-
-    if (!isUserActive(userInfo)) {
-      return {
-        ok: false,
-        message: "Usuário ou senha inválidos, ou conta inativa no servidor.",
-      };
-    }
-
-    saveXtreamSession(username, password, data);
-
-    return { ok: true, userInfo, serverInfo: data?.server_info };
+    return { ok: false, message: "Login ou senha inválidos" };
   }
 
   function clearXtreamCatalogCache() {
@@ -547,14 +574,6 @@
     }
   }
 
-  async function enterDeveloperMode() {
-    clearLoginError();
-    console.info("[SlimFlix] Modo desenvolvedor — sessão local de teste.");
-    sessionStorage.setItem("slimflix_dev_mode", "1");
-    saveXtreamSession("dev", "dev", null);
-    await iniciarSessaoComPrecarga();
-  }
-
   async function fetchXtreamStreamsAndAdapt(session) {
     const [liveCategories, vodCategories, seriesCategories] = await Promise.all([
       buscarCategoriasCanais(),
@@ -685,11 +704,6 @@
     }
   });
 
-  devBypassBtn?.addEventListener("click", (e) => {
-    e.preventDefault();
-    void enterDeveloperMode();
-  });
-
   logoutBtn?.addEventListener("click", (e) => {
     e.preventDefault();
     logoutUser();
@@ -730,12 +744,14 @@
   }
 
   window.SlimFlixAuth = {
-    IPTV_SERVER,
+    IPTV_SERVERS,
+    STORAGE_ACTIVE_SERVER,
     STORAGE_SESSION,
     STORAGE_USER,
     hasActiveSession,
     enforceGuestOnlyUI,
     parseStoredSession,
+    getActiveIptvServer,
     buildProxyUrl,
     wrapUrlForProxy,
     proxyPlaybackUrl: wrapUrlForProxy,
@@ -760,7 +776,6 @@
     iniciarSessaoComPrecarga,
     showPlayerApiAlert,
     hidePlayerApiAlert,
-    enterDeveloperMode,
     logoutUser,
     clearXtreamSession,
     saveXtreamSession,
