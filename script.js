@@ -445,7 +445,7 @@ function playLiveChannel(entry, playbackToken) {
   if (!entry?.url) return;
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  const urlDoCanal = enforceHttpStreamUrl(buildXtreamLiveStreamUrl(entry, entry.url));
+  const urlDoCanal = proxyPlaybackUrl(buildXtreamLiveStreamUrl(entry, entry.url));
 
   destroyHls();
   destroyMpegts();
@@ -578,11 +578,15 @@ function isXtreamLiveStreamUrl(url) {
   return /\/live\//i.test(url || "");
 }
 
-/** Reprodução via proxy nginx /api/. */
+/** Reprodução via proxy nginx /api/ (evita Mixed Content em https://). */
 function proxyPlaybackUrl(url) {
   const trimmed = (url || "").trim();
   if (!trimmed) return trimmed;
-  return window.SlimFlixAuth?.wrapUrlForProxy?.(trimmed) || trimmed;
+  const rewrite =
+    window.SlimFlixAuth?.ensureProxiedUrl ||
+    window.SlimFlixAuth?.wrapUrlForProxy ||
+    window.SlimFlixAuth?.httpUrlToApiProxy;
+  return rewrite ? rewrite(trimmed) : trimmed;
 }
 
 /**

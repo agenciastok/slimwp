@@ -5,14 +5,17 @@
   /** Prefixo do proxy reverso local (evita Mixed Content). */
   const IPTV_API_BASE = "/api";
 
-  /** Painéis Xtream em HTTP — o JS reescreve para /api/{host}/... antes do fetch. */
-  const IPTV_UPSTREAM_SERVERS = [
-    "http://spacetg.shop",
-    "http://premiumcp.online",
-    "http://cdn.conectp.cloud",
+  /** Hosts dos painéis (failover). URLs de API/stream são sempre /api/{host}/… no navegador. */
+  const IPTV_UPSTREAM_HOSTS = [
+    "spacetg.shop",
+    "premiumcp.online",
+    "cdn.conectp.cloud",
   ];
 
-  const IPTV_SERVERS = IPTV_UPSTREAM_SERVERS;
+  /** Compatibilidade — não usar em fetch; apenas referência legada. */
+  const IPTV_UPSTREAM_SERVERS = IPTV_UPSTREAM_HOSTS.map((host) => `http://${host}`);
+
+  const IPTV_SERVERS = IPTV_UPSTREAM_HOSTS;
 
   const STORAGE_SESSION = "slimflix_session";
   const STORAGE_ACTIVE_SERVER = "active_iptv_server";
@@ -203,6 +206,31 @@
     return trimmed;
   }
 
+  /** /api/spacetg.shop a partir do hostname ou URL http legada. */
+  function hostToApiBase(host) {
+    const cleaned = String(host || "")
+      .trim()
+      .replace(/^https?:\/\//i, "")
+      .split("/")[0]
+      .trim();
+    return cleaned ? `${IPTV_API_BASE}/${cleaned}` : "";
+  }
+
+  /** Garante URL relativa /api/… antes de fetch ou <video src> (evita Mixed Content). */
+  function ensureProxiedUrl(targetUrl) {
+    let url = wrapUrlForProxy(targetUrl);
+    if (/^https?:\/\//i.test(url)) {
+      url = httpUrlToApiProxy(url);
+    }
+    if (/^https?:\/\//i.test(url) && window.location.protocol === "https:") {
+      console.error("[SlimFlix] Bloqueio Mixed Content — URL ainda é HTTP absoluta:", url);
+      throw new TypeError(
+        "Mixed Content: requisição HTTP bloqueada em página HTTPS. Use o proxy /api/."
+      );
+    }
+    return url;
+  }
+
   /** Base do painel no proxy: http://host → /api/host */
   function normalizeServerUrl(raw) {
     const trimmed = (raw || "").trim();
@@ -255,9 +283,9 @@
     return trimmed;
   }
 
-  /** Compatibilidade: alias de wrapUrlForProxy. */
+  /** Compatibilidade: alias de ensureProxiedUrl. */
   function buildProxyUrl(targetUrl) {
-    return wrapUrlForProxy(targetUrl);
+    return ensureProxiedUrl(targetUrl);
   }
 
   function isXtreamLiveStreamUrl(targetUrl) {
@@ -272,20 +300,11 @@
 
   /** GET via proxy /api/{host}/… — nunca fetch HTTP absoluto no navegador. */
   async function fetchXtreamUrl(targetUrl) {
-    let url = wrapUrlForProxy(targetUrl);
-    if (/^https?:\/\//i.test(url)) {
-      url = httpUrlToApiProxy(url);
-    }
+    const url = ensureProxiedUrl(targetUrl);
     return fetch(url, { method: "GET" });
   }
 
-  DEFAULT_ALLOWED_HOSTS = IPTV_UPSTREAM_SERVERS.map((raw) => {
-    try {
-      return new URL(raw).hostname.toLowerCase();
-    } catch {
-      return "";
-    }
-  }).filter(Boolean);
+  DEFAULT_ALLOWED_HOSTS = IPTV_UPSTREAM_HOSTS.map((host) => host.toLowerCase()).filter(Boolean);
 
   function getActiveIptvServer() {
     const stored = localStorage.getItem(STORAGE_ACTIVE_SERVER);
@@ -382,8 +401,19 @@
     return auth === 1 || auth === "1";
   }
 
+  function resolveApiBase(serverBase) {
+    if (!serverBase) return getActiveIptvServer();
+    const raw = String(serverBase).trim();
+    if (raw.startsWith(`${IPTV_API_BASE}/`)) return normalizeServerUrl(raw);
+    if (/^https?:\/\//i.test(raw)) return normalizeServerUrl(raw);
+    return hostToApiBase(raw);
+  }
+
   function buildPlayerApiUrl(username, password, action, extraParams = {}, serverBase) {
-    const base = normalizeServerUrl(serverBase || getActiveIptvServer());
+    const base = resolveApiBase(serverBase);
+    if (!base.startsWith(`${IPTV_API_BASE}/`)) {
+      throw new Error("Servidor IPTV inválido para proxy /api/.");
+    }
     const params = new URLSearchParams({
       username,
       password,
@@ -431,11 +461,11 @@
       };
     }
 
-    for (const upstream of IPTV_UPSTREAM_SERVERS) {
-      const server = normalizeServerUrl(upstream);
+    for (const host of IPTV_UPSTREAM_HOSTS) {
+      const server = hostToApiBase(host);
       if (!server) continue;
 
-      const url = buildPlayerApiUrl(username, password, undefined, {}, upstream);
+      const url = buildPlayerApiUrl(username, password, undefined, {}, server);
 
       try {
         const response = await fetchXtreamUrl(url);
@@ -445,8 +475,8 @@
         const userInfo = normalizeUserInfo(data);
 
         console.log("[SlimFlix Xtream] Tentativa de login:", {
-          upstream,
-          proxy: server,
+          host,
+          proxyUrl: url,
           username,
           user_info: userInfo,
           server_info: data?.server_info,
@@ -454,7 +484,7 @@
 
         if (!isXtreamAuthValid(userInfo)) continue;
 
-        saveXtreamSession(username, password, data, upstream);
+        saveXtreamSession(username, password, data, server);
         console.info("[SlimFlix Xtream] Login OK via proxy:", server);
 
         return { ok: true, userInfo, serverInfo: data?.server_info, server };
@@ -814,9 +844,12 @@
 
   window.SlimFlixAuth = {
     IPTV_API_BASE,
+    IPTV_UPSTREAM_HOSTS,
     IPTV_UPSTREAM_SERVERS,
     IPTV_SERVERS,
     STORAGE_ACTIVE_SERVER,
+    hostToApiBase,
+    ensureProxiedUrl,
     httpUrlToApiProxy,
     normalizeServerUrl,
     toApiPath,
@@ -828,7 +861,7 @@
     getActiveIptvServer,
     buildProxyUrl,
     wrapUrlForProxy,
-    proxyPlaybackUrl: wrapUrlForProxy,
+    proxyPlaybackUrl: ensureProxiedUrl,
     isXtreamLiveStreamUrl,
     isAllowedUpstreamHost,
     fetchXtreamUrl,
