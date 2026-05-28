@@ -445,7 +445,9 @@ function playLiveChannel(entry, playbackToken) {
   if (!entry?.url) return;
   if (playbackToken != null && playbackToken !== channelPlaybackToken) return;
 
-  const urlDoCanal = proxyPlaybackUrl(buildXtreamLiveStreamUrl(entry, entry.url));
+  const urlDoCanal = toAbsolutePlaybackUrl(
+    proxyPlaybackUrl(buildXtreamLiveStreamUrl(entry, entry.url))
+  );
 
   destroyHls();
   destroyMpegts();
@@ -462,7 +464,7 @@ function playLiveChannel(entry, playbackToken) {
 
   console.info("[Slimflix] Canal:", {
     nome: entry.name,
-    url: urlDoCanal,
+    uri: urlDoCanal,
     streamId: entry.xtreamStreamId,
     videoTag: videoElement.tagName,
   });
@@ -578,7 +580,19 @@ function isXtreamLiveStreamUrl(url) {
   return /\/live\//i.test(url || "");
 }
 
-/** Reprodução via proxy nginx /api/ (evita Mixed Content em https://). */
+/** /api/stream… → https://slimflix.lat/api/stream… (mpegts.js exige URL absoluta no worker). */
+function toAbsolutePlaybackUrl(url) {
+  const trimmed = String(url || "").trim();
+  if (!trimmed) return trimmed;
+  if (window.SlimFlixAuth?.toAbsolutePlaybackUrl) {
+    return window.SlimFlixAuth.toAbsolutePlaybackUrl(trimmed);
+  }
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("/")) return `${window.location.origin}${trimmed}`;
+  return trimmed;
+}
+
+/** Reprodução via proxy Node /api/stream (evita Mixed Content em HTTPS). */
 function proxyPlaybackUrl(url) {
   const trimmed = (url || "").trim();
   if (!trimmed) return trimmed;
@@ -586,7 +600,8 @@ function proxyPlaybackUrl(url) {
     window.SlimFlixAuth?.ensureProxiedUrl ||
     window.SlimFlixAuth?.wrapUrlForProxy ||
     window.SlimFlixAuth?.httpUrlToApiProxy;
-  return rewrite ? rewrite(trimmed) : trimmed;
+  const proxied = rewrite ? rewrite(trimmed) : trimmed;
+  return toAbsolutePlaybackUrl(proxied);
 }
 
 /**

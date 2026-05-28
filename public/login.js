@@ -238,15 +238,30 @@
     return cleaned ? `${IPTV_API_BASE}/${cleaned}` : "";
   }
 
-  /** Garante URL relativa /api/… antes de fetch ou <video src> (evita Mixed Content). */
+  /** Caminho /api/… → URL absoluta (mpegts.js Worker exige origin + path). */
+  function toAbsolutePlaybackUrl(pathOrUrl) {
+    const trimmed = String(pathOrUrl || "").trim();
+    if (!trimmed) return trimmed;
+    if (/^https?:\/\//i.test(trimmed)) return trimmed;
+    if (trimmed.startsWith("/")) {
+      return `${window.location.origin}${trimmed}`;
+    }
+    return trimmed;
+  }
+
+  /** Proxy de stream via Node (/api/stream) em URL absoluta HTTPS. */
   function ensureProxiedUrl(targetUrl) {
     const trimmed = String(targetUrl || "").trim();
     if (!trimmed) return trimmed;
-    if (trimmed.startsWith(`${IPTV_API_BASE}/stream?url=`)) return trimmed;
-    if (/^https?:\/\//i.test(trimmed)) {
-      return `${IPTV_API_BASE}/stream?url=${encodeURIComponent(trimmed)}`;
+    if (trimmed.startsWith(`${IPTV_API_BASE}/stream?url=`)) {
+      return toAbsolutePlaybackUrl(trimmed);
     }
-    return trimmed;
+    if (/^https?:\/\//i.test(trimmed)) {
+      return toAbsolutePlaybackUrl(
+        `${IPTV_API_BASE}/stream?url=${encodeURIComponent(trimmed)}`
+      );
+    }
+    return toAbsolutePlaybackUrl(trimmed);
   }
 
   /** URL base do painel em HTTP (usada só no body para o servidor Node). */
@@ -894,6 +909,7 @@
     IPTV_SERVERS,
     STORAGE_ACTIVE_SERVER,
     hostToApiBase,
+    toAbsolutePlaybackUrl,
     ensureProxiedUrl,
     httpUrlToApiProxy,
     normalizeServerUrl,
