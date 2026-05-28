@@ -2,7 +2,7 @@
  * SlimFlix — autenticação Xtream Codes API e navegação SPA (login ↔ player)
  */
 (function () {
-  const SLIMFLIX_LOGIN_BUILD = "login-api-proxy-5";
+  const SLIMFLIX_LOGIN_BUILD = "login-vps-7";
   console.info("[SlimFlix] login.js build:", SLIMFLIX_LOGIN_BUILD);
 
   /** Prefixo do proxy reverso local (evita Mixed Content). */
@@ -190,20 +190,39 @@
     }
   }
 
+  function getProxyMode() {
+    if (window.SlimFlixApiProxyShim?.proxyMode) return window.SlimFlixApiProxyShim.proxyMode();
+    const meta = document.querySelector('meta[name="slimflix-proxy"]');
+    return meta?.content?.trim() || "path";
+  }
+
   /**
-   * http://spacetg.shop/player_api.php?… → /api/spacetg.shop/player_api.php?…
-   * Remove o protocolo http(s) e prefixa /api/ (host fica no path para o nginx).
+   * Vercel (query): http://host/… → /api/proxy?url=…
+   * Docker (path):  http://host/… → /api/host/…
    */
   function httpUrlToApiProxy(targetUrl) {
+    if (window.SlimFlixApiProxyShim?.toProxyUrl) {
+      return window.SlimFlixApiProxyShim.toProxyUrl(targetUrl);
+    }
     const trimmed = String(targetUrl || "").trim();
     if (!trimmed) return trimmed;
-    if (trimmed.startsWith(`${IPTV_API_BASE}/`)) return trimmed;
+    if (trimmed.startsWith(`${IPTV_API_BASE}/proxy?url=`)) return trimmed;
     if (/^https?:\/\//i.test(trimmed)) {
-      try {
-        const parsed = new URL(trimmed);
-        return `${IPTV_API_BASE}/${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
-      } catch {
-        return trimmed;
+      if (getProxyMode() === "path") {
+        try {
+          const parsed = new URL(trimmed);
+          return `${IPTV_API_BASE}/${parsed.host}${parsed.pathname}${parsed.search}${parsed.hash}`;
+        } catch {
+          return trimmed;
+        }
+      }
+      return `${IPTV_API_BASE}/proxy?url=${encodeURIComponent(trimmed)}`;
+    }
+    if (trimmed.startsWith(`${IPTV_API_BASE}/`) && getProxyMode() === "query") {
+      const match = trimmed.match(/^\/api\/([^/]+)(\/[^?]*)?(\?.*)?$/);
+      if (match) {
+        const httpUrl = `http://${match[1]}${match[2] || "/"}${match[3] || ""}`;
+        return `${IPTV_API_BASE}/proxy?url=${encodeURIComponent(httpUrl)}`;
       }
     }
     return trimmed;
@@ -421,7 +440,8 @@
 
   function buildPlayerApiUrl(username, password, action, extraParams = {}, serverBase) {
     const base = resolveApiBase(serverBase);
-    if (!base.startsWith(`${IPTV_API_BASE}/`)) {
+    const host = base.replace(new RegExp(`^${IPTV_API_BASE}/`), "").replace(/^https?:\/\//i, "");
+    if (!host) {
       throw new Error("Servidor IPTV inválido para proxy /api/.");
     }
     const params = new URLSearchParams({
@@ -432,7 +452,8 @@
     Object.entries(extraParams).forEach(([key, value]) => {
       if (value != null && value !== "") params.set(key, String(value));
     });
-    return `${base}/player_api.php?${params.toString()}`;
+    const httpUrl = `http://${host}/player_api.php?${params.toString()}`;
+    return httpUrlToApiProxy(httpUrl);
   }
 
   /**
@@ -877,6 +898,7 @@
     getActiveIptvServer,
     buildProxyUrl,
     wrapUrlForProxy,
+    getProxyMode,
     proxyPlaybackUrl: ensureProxiedUrl,
     isXtreamLiveStreamUrl,
     isAllowedUpstreamHost,

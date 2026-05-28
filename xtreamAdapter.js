@@ -32,15 +32,22 @@
   }
 
   /** URLs de stream via proxy nginx /api/. */
+  function proxyStreamUrl(httpUrl) {
+    const rewrite = global.SlimFlixApiProxyShim?.toProxyUrl || global.SlimFlixAuth?.httpUrlToApiProxy;
+    return rewrite ? rewrite(httpUrl) : httpUrl;
+  }
+
   function buildLiveStreamUrl(server, username, password, streamId) {
-    const base = streamApiBase(server);
-    return `${base}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.ts`;
+    const base = streamApiBase(server).replace(new RegExp(`^/api/`), "");
+    const httpUrl = `http://${base}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.ts`;
+    return proxyStreamUrl(httpUrl);
   }
 
   function buildVodStreamUrl(server, username, password, streamId, extension) {
     const ext = (extension || "mp4").replace(/^\./, "");
-    const base = streamApiBase(server);
-    return `${base}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.${ext}`;
+    const base = streamApiBase(server).replace(new RegExp(`^/api/`), "");
+    const httpUrl = `http://${base}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.${ext}`;
+    return proxyStreamUrl(httpUrl);
   }
 
   function mapLiveStream(stream, categoryMap, session) {

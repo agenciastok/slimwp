@@ -8,7 +8,9 @@ const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { Agent, fetch: undiciFetch } = require("undici");
 
-const ALLOWED_HOSTS = (process.env.ALLOWED_IPTV_HOSTS || "spacetg.shop")
+const ALLOWED_HOSTS = (
+  process.env.ALLOWED_IPTV_HOSTS || "spacetg.shop,premiumcp.online,cdn.conectp.cloud"
+)
   .split(",")
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);

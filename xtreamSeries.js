@@ -108,9 +108,14 @@
 
     const ext = (extension || "mp4").replace(/^\./, "");
 
-    const base = global.SlimFlixAuth?.normalizeServerUrl?.(session.server) || "/api";
+    const base = (global.SlimFlixAuth?.normalizeServerUrl?.(session.server) || "/api")
+      .replace(/^\/api\//, "");
 
-    return `${base}/series/${encodeURIComponent(session.username)}/${encodeURIComponent(session.password)}/${episodeId}.${ext}`;
+    const httpUrl = `http://${base}/series/${encodeURIComponent(session.username)}/${encodeURIComponent(session.password)}/${episodeId}.${ext}`;
+
+    const rewrite = global.SlimFlixApiProxyShim?.toProxyUrl || global.SlimFlixAuth?.httpUrlToApiProxy;
+
+    return rewrite ? rewrite(httpUrl) : httpUrl;
 
   }
 

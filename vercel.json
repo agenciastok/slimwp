@@ -1,5 +1,9 @@
 {
   "rewrites": [
-    { "source": "/api/proxy", "destination": "/api/proxy.js" }
+    { "source": "/api/proxy", "destination": "/api/proxy.js" },
+    {
+      "source": "/api/:host/:path*",
+      "destination": "/api/xtream-proxy?host=:host&path=:path*"
+    }
   ]
 }

@@ -8,7 +8,59 @@
 
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
+  <!-- VPS + nginx: path. (query = só se usar Vercel) -->
+  <meta name="slimflix-proxy" content="path" />
+
   <title>SlimFlix — Webplayer</title>
+
+  <script>
+    (function () {
+      var BUILD = "inline-proxy-vps-7";
+      var API = "/api";
+      function proxyMode() {
+        var m = document.querySelector('meta[name="slimflix-proxy"]');
+        return (m && m.content) ? m.content.trim() : "path";
+      }
+      function toProxyUrl(url) {
+        var raw = String(url || "").trim();
+        if (!raw) return raw;
+        if (raw.indexOf(API + "/proxy?url=") === 0) return raw;
+        if (raw.indexOf(API + "/") === 0 && proxyMode() === "path") return raw;
+        if (/^https?:\/\//i.test(raw)) {
+          if (proxyMode() === "path") {
+            try {
+              var p = new URL(raw);
+              return API + "/" + p.host + p.pathname + p.search + p.hash;
+            } catch (e) { return raw; }
+          }
+          return API + "/proxy?url=" + encodeURIComponent(raw);
+        }
+        if (raw.indexOf(API + "/") === 0 && proxyMode() === "query") {
+          var match = raw.match(/^\/api\/([^/]+)(\/[^?]*)?(\?.*)?$/);
+          if (match) {
+            var httpUrl = "http://" + match[1] + (match[2] || "/") + (match[3] || "");
+            return API + "/proxy?url=" + encodeURIComponent(httpUrl);
+          }
+        }
+        return raw;
+      }
+      var nativeFetch = window.fetch.bind(window);
+      window.fetch = function (input, init) {
+        if (typeof input === "string") return nativeFetch(toProxyUrl(input), init);
+        if (input instanceof Request) {
+          var proxied = toProxyUrl(input.url);
+          if (proxied !== input.url) return nativeFetch(new Request(proxied, input), init);
+        }
+        return nativeFetch(input, init);
+      };
+      var xhrOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url, async, user, password) {
+        return xhrOpen.call(this, method, toProxyUrl(url), async, user, password);
+      };
+      window.SlimFlixApiProxyShim = { BUILD: BUILD, toProxyUrl: toProxyUrl, proxyMode: proxyMode };
+      console.info("[SlimFlix]", BUILD, "proxy=", proxyMode());
+    })();
+  </script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
 
@@ -651,8 +703,6 @@
 
 
 
-  <script src="api-proxy-shim.js?v=5"></script>
-
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 
   <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
@@ -663,9 +713,9 @@
 
   <script src="xtreamSeries.js"></script>
 
-  <script src="script.js?v=api-proxy-5"></script>
+  <script src="script.js?v=vps-7"></script>
 
-  <script src="login.js?v=api-proxy-5"></script>
+  <script src="login.js?v=vps-7"></script>
 
 </body>
 
