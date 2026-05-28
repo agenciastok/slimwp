@@ -2,6 +2,9 @@
  * SlimFlix — autenticação Xtream Codes API e navegação SPA (login ↔ player)
  */
 (function () {
+  const SLIMFLIX_LOGIN_BUILD = "login-api-proxy-5";
+  console.info("[SlimFlix] login.js build:", SLIMFLIX_LOGIN_BUILD);
+
   /** Prefixo do proxy reverso local (evita Mixed Content). */
   const IPTV_API_BASE = "/api";
 
@@ -300,7 +303,14 @@
 
   /** GET via proxy /api/{host}/… — nunca fetch HTTP absoluto no navegador. */
   async function fetchXtreamUrl(targetUrl) {
-    const url = ensureProxiedUrl(targetUrl);
+    let url = ensureProxiedUrl(targetUrl);
+    if (/^https?:\/\//i.test(url)) {
+      url = httpUrlToApiProxy(url);
+    }
+    if (/^https?:\/\//i.test(url)) {
+      console.error("[SlimFlix] fetch bloqueado (Mixed Content):", url, SLIMFLIX_LOGIN_BUILD);
+      throw new TypeError("URL HTTP absoluta — deploy login.js + api-proxy-shim.js desatualizado.");
+    }
     return fetch(url, { method: "GET" });
   }
 
@@ -489,7 +499,12 @@
 
         return { ok: true, userInfo, serverInfo: data?.server_info, server };
       } catch (err) {
-        console.warn("[SlimFlix Xtream] Proxy /api indisponível:", server, err);
+        console.warn("[SlimFlix Xtream] Falha no login via proxy:", {
+          build: SLIMFLIX_LOGIN_BUILD,
+          proxyBase: server,
+          requestUrl: url,
+          err,
+        });
       }
     }
 
@@ -843,6 +858,7 @@
   }
 
   window.SlimFlixAuth = {
+    SLIMFLIX_LOGIN_BUILD,
     IPTV_API_BASE,
     IPTV_UPSTREAM_HOSTS,
     IPTV_UPSTREAM_SERVERS,
