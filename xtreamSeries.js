@@ -108,7 +108,9 @@
 
     const ext = (extension || "mp4").replace(/^\./, "");
 
-    return `${session.server}/series/${encodeURIComponent(session.username)}/${encodeURIComponent(session.password)}/${episodeId}.${ext}`;
+    const base = global.SlimFlixAuth?.normalizeServerUrl?.(session.server) || "/api";
+
+    return `${base}/series/${encodeURIComponent(session.username)}/${encodeURIComponent(session.password)}/${episodeId}.${ext}`;
 
   }
 

@@ -2,12 +2,11 @@
  * SlimFlix — autenticação Xtream Codes API e navegação SPA (login ↔ player)
  */
 (function () {
-  /** Altere a lista de painéis Xtream (failover em cascata no login). */
-  const IPTV_SERVERS = [
-    "http://spacetg.shop",
-    "http://premiumcp.online",
-    "http://cdn.conectp.cloud",
-  ];
+  /** Base das requisições Xtream (proxy nginx em /api/). */
+  const IPTV_API_BASE = "/api";
+
+  /** Entradas para failover de login (todas passam pelo mesmo proxy /api/). */
+  const IPTV_SERVERS = [IPTV_API_BASE];
 
   const STORAGE_SESSION = "slimflix_session";
   const STORAGE_ACTIVE_SERVER = "active_iptv_server";
@@ -145,12 +144,7 @@
   let DEFAULT_ALLOWED_HOSTS = [];
 
   function getSessionServerHost() {
-    try {
-      const server = normalizeServerUrl(getStoredSession().server);
-      return new URL(server).hostname.toLowerCase();
-    } catch {
-      return "";
-    }
+    return window.location.hostname.toLowerCase();
   }
 
   function isAllowedUpstreamHost(hostname) {
@@ -176,48 +170,89 @@
     }
   }
 
-  /** Compatibilidade: retorna a URL direta do painel (sem proxy). */
+  /** Converte pathname Xtream (/live, /movie, /player_api.php) para rota local /api/... */
+  function toApiPath(pathAndQuery) {
+    let path = String(pathAndQuery || "").trim();
+    if (!path) return IPTV_API_BASE;
+    if (!path.startsWith("/")) path = `/${path}`;
+    if (path === IPTV_API_BASE || path.startsWith(`${IPTV_API_BASE}/`)) {
+      return path.replace(/\/+$/, "") || IPTV_API_BASE;
+    }
+    return `${IPTV_API_BASE}${path}`.replace(/\/+$/, "") || IPTV_API_BASE;
+  }
+
+  /** Normaliza base do painel: sempre /api (URLs http externas viram caminho sob /api). */
+  function normalizeServerUrl(raw) {
+    const trimmed = (raw || "").trim();
+    if (!trimmed) return IPTV_API_BASE;
+    if (trimmed.startsWith(IPTV_API_BASE)) return toApiPath(trimmed);
+    if (/^https?:\/\//i.test(trimmed)) {
+      try {
+        const parsed = new URL(trimmed);
+        return toApiPath(parsed.pathname + parsed.search);
+      } catch {
+        return IPTV_API_BASE;
+      }
+    }
+    return toApiPath(trimmed.startsWith("/") ? trimmed : `/${trimmed}`);
+  }
+
+  /**
+   * Reescreve links de stream/API externos para o proxy relativo /api/.
+   */
+  function wrapUrlForProxy(targetUrl) {
+    if (!targetUrl || typeof targetUrl !== "string") return targetUrl;
+    const trimmed = targetUrl.trim();
+    if (!trimmed) return trimmed;
+
+    const legacy = unwrapLegacyProxyUrl(trimmed);
+    if (legacy !== trimmed) return wrapUrlForProxy(legacy);
+
+    if (trimmed.startsWith(`${IPTV_API_BASE}/`) || trimmed === IPTV_API_BASE) {
+      return trimmed;
+    }
+
+    try {
+      const parsed = new URL(trimmed, window.location.origin);
+      if (parsed.origin === window.location.origin && parsed.pathname.startsWith(IPTV_API_BASE)) {
+        return parsed.pathname + parsed.search + parsed.hash;
+      }
+      if (/^https?:\/\//i.test(trimmed)) {
+        return toApiPath(parsed.pathname + parsed.search);
+      }
+    } catch {
+      if (trimmed.startsWith("/")) return toApiPath(trimmed);
+    }
+
+    if (/\/(live|movie|series)\//i.test(trimmed) || /player_api\.php/i.test(trimmed)) {
+      return toApiPath(trimmed.startsWith("/") ? trimmed : `/${trimmed}`);
+    }
+
+    return trimmed;
+  }
+
+  /** Compatibilidade: alias de wrapUrlForProxy. */
   function buildProxyUrl(targetUrl) {
-    return unwrapLegacyProxyUrl(targetUrl);
+    return wrapUrlForProxy(targetUrl);
   }
 
   function isXtreamLiveStreamUrl(targetUrl) {
     if (!targetUrl || typeof targetUrl !== "string") return false;
     try {
-      const path = new URL(targetUrl.trim()).pathname.toLowerCase();
+      const path = new URL(targetUrl.trim(), window.location.origin).pathname.toLowerCase();
       return /\/live\//.test(path);
     } catch {
       return /\/live\//i.test(targetUrl);
     }
   }
 
-  /**
-   * Requisições diretas ao painel Xtream (VPS/nginx estático — sem /api/proxy).
-   */
-  function wrapUrlForProxy(targetUrl) {
-    return unwrapLegacyProxyUrl(targetUrl);
-  }
-
-  /** GET direto em player_api.php e demais endpoints do painel. */
+  /** GET em player_api.php e streams via proxy nginx /api/. */
   async function fetchXtreamUrl(targetUrl) {
-    const url = unwrapLegacyProxyUrl(targetUrl);
+    const url = wrapUrlForProxy(targetUrl);
     return fetch(url, { method: "GET" });
   }
 
-  function normalizeServerUrl(raw) {
-    let url = (raw || "").trim();
-    if (!url) return "";
-    if (!/^https?:\/\//i.test(url)) url = `http://${url}`;
-    return url.replace(/\/+$/, "");
-  }
-
-  DEFAULT_ALLOWED_HOSTS = IPTV_SERVERS.map((raw) => {
-    try {
-      return new URL(normalizeServerUrl(raw)).hostname.toLowerCase();
-    } catch {
-      return "";
-    }
-  }).filter(Boolean);
+  DEFAULT_ALLOWED_HOSTS = [getSessionServerHost()].filter(Boolean);
 
   function getActiveIptvServer() {
     const stored = localStorage.getItem(STORAGE_ACTIVE_SERVER);
@@ -226,7 +261,7 @@
     const parsed = parseStoredSession();
     if (parsed?.server) return normalizeServerUrl(parsed.server);
 
-    return "";
+    return IPTV_API_BASE;
   }
 
   function getLoginCredentials() {
@@ -260,9 +295,9 @@
     return hasActiveSession();
   }
 
-  function saveXtreamSession(username, password, apiPayload, serverUrl) {
+  function saveXtreamSession(username, password, apiPayload) {
     const userInfo = normalizeUserInfo(apiPayload);
-    const server = normalizeServerUrl(serverUrl);
+    const server = IPTV_API_BASE;
     localStorage.setItem(STORAGE_USER, username);
     localStorage.setItem(STORAGE_PASS, password);
     localStorage.setItem(STORAGE_USER_LEGACY, username);
@@ -314,8 +349,7 @@
     return auth === 1 || auth === "1";
   }
 
-  function buildPlayerApiUrl(username, password, action, extraParams = {}, serverBase) {
-    const base = normalizeServerUrl(serverBase || getActiveIptvServer());
+  function buildPlayerApiUrl(username, password, action, extraParams = {}) {
     const params = new URLSearchParams({
       username,
       password,
@@ -324,7 +358,7 @@
     Object.entries(extraParams).forEach(([key, value]) => {
       if (value != null && value !== "") params.set(key, String(value));
     });
-    return `${base}/player_api.php?${params.toString()}`;
+    return `${IPTV_API_BASE}/player_api.php?${params.toString()}`;
   }
 
   /**
@@ -338,7 +372,7 @@
     if (!server || !username || !password) {
       throw new Error("Sessão Xtream não encontrada. Faça login novamente.");
     }
-    const url = buildPlayerApiUrl(username, password, action, extraParams, server);
+    const url = buildPlayerApiUrl(username, password, action, extraParams);
     const response = await fetchXtreamUrl(url);
     if (!response.ok) {
       throw new Error(`Servidor respondeu com erro HTTP ${response.status}.`);
@@ -365,9 +399,9 @@
 
     for (const serverCandidate of IPTV_SERVERS) {
       const server = normalizeServerUrl(serverCandidate);
-      if (!server || server.includes("seu-painel-iptv")) continue;
+      if (!server) continue;
 
-      const url = buildPlayerApiUrl(username, password, undefined, {}, server);
+      const url = buildPlayerApiUrl(username, password);
 
       try {
         const response = await fetchXtreamUrl(url);
@@ -385,12 +419,12 @@
 
         if (!isXtreamAuthValid(userInfo)) continue;
 
-        saveXtreamSession(username, password, data, server);
-        console.info("[SlimFlix Xtream] Login OK no servidor:", server);
+        saveXtreamSession(username, password, data);
+        console.info("[SlimFlix Xtream] Login OK via:", server);
 
         return { ok: true, userInfo, serverInfo: data?.server_info, server };
       } catch (err) {
-        console.warn("[SlimFlix Xtream] Servidor indisponível:", server, err);
+        console.warn("[SlimFlix Xtream] Proxy /api indisponível:", server, err);
       }
     }
 
@@ -744,8 +778,11 @@
   }
 
   window.SlimFlixAuth = {
+    IPTV_API_BASE,
     IPTV_SERVERS,
     STORAGE_ACTIVE_SERVER,
+    normalizeServerUrl,
+    toApiPath,
     STORAGE_SESSION,
     STORAGE_USER,
     hasActiveSession,

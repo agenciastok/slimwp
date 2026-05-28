@@ -24,14 +24,23 @@
     return categoryMap.get(String(categoryId)) || fallbackPrefix || "Sem categoria";
   }
 
-  /** URL bruta Xtream — reprodução direta no painel (HTTP na VPS). */
+  function streamApiBase(server) {
+    const normalize = global.SlimFlixAuth?.normalizeServerUrl;
+    if (normalize) return normalize(server);
+    const raw = (server || "").trim();
+    return raw.startsWith("/api") ? raw.replace(/\/+$/, "") : "/api";
+  }
+
+  /** URLs de stream via proxy nginx /api/. */
   function buildLiveStreamUrl(server, username, password, streamId) {
-    return `${server}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.ts`;
+    const base = streamApiBase(server);
+    return `${base}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.ts`;
   }
 
   function buildVodStreamUrl(server, username, password, streamId, extension) {
     const ext = (extension || "mp4").replace(/^\./, "");
-    return `${server}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.${ext}`;
+    const base = streamApiBase(server);
+    return `${base}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.${ext}`;
   }
 
   function mapLiveStream(stream, categoryMap, session) {
@@ -124,7 +133,7 @@
 
   /** Catálogo fictício para desenvolvimento quando a API falha. */
   function getMockCatalogEntries(session) {
-    const server = session?.server || "http://demo.local:8080";
+    const server = session?.server || "/api";
     const user = session?.username || "demo";
     const pass = session?.password || "demo";
 

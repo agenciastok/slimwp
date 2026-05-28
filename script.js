@@ -206,33 +206,33 @@ function canUseMpegtsLive() {
 }
 
 /**
- * URL canônica Xtream: http://dominio/live/usuario/senha/STREAM_ID.ts
+ * URL canônica Xtream via proxy: /api/live/usuario/senha/STREAM_ID.ts
  * Prioriza stream_id da API; não inventa .m3u8 a partir de rotas /auth/ etc.
  */
 function buildXtreamLiveStreamUrl(entry, originalUrl) {
   const session = window.SlimFlixAuth?.getStoredSession?.();
   const streamId = entry?.xtreamStreamId ?? entry?.xtream_stream_id;
   if (session?.server && session?.username && session?.password && streamId != null && streamId !== "") {
-    const base = session.server.replace(/\/+$/, "");
+    const base = (
+      window.SlimFlixAuth?.normalizeServerUrl?.(session.server) || session.server
+    ).replace(/\/+$/, "");
     const built = `${base}/live/${encodeURIComponent(session.username)}/${encodeURIComponent(session.password)}/${streamId}.ts`;
-    try {
-      return new URL(built).href;
-    } catch {
-      return built;
-    }
+    return proxyPlaybackUrl(built);
   }
-  return enforceHttpStreamUrl(toAbsoluteLiveStreamUrl(originalUrl));
+  return proxyPlaybackUrl(toAbsoluteLiveStreamUrl(originalUrl));
 }
 
-/** Ambiente VPS: streams sempre em HTTP (nunca forçar HTTPS). */
+/** Rotas /api/ permanecem relativas; URLs http externas viram http. */
 function enforceHttpStreamUrl(url) {
   if (!url) return url;
+  const trimmed = String(url).trim();
+  if (trimmed.startsWith("/")) return trimmed;
   try {
-    const parsed = new URL(String(url).trim());
+    const parsed = new URL(trimmed);
     parsed.protocol = "http:";
     return parsed.href;
   } catch {
-    return String(url).trim().replace(/^https:/i, "http:");
+    return trimmed.replace(/^https:/i, "http:");
   }
 }
 
@@ -578,7 +578,7 @@ function isXtreamLiveStreamUrl(url) {
   return /\/live\//i.test(url || "");
 }
 
-/** Reprodução direta no painel (sem /api/proxy). */
+/** Reprodução via proxy nginx /api/. */
 function proxyPlaybackUrl(url) {
   const trimmed = (url || "").trim();
   if (!trimmed) return trimmed;
@@ -593,30 +593,38 @@ function ensureLiveTsUrl(url) {
   const trimmed = url.trim();
   if (!isXtreamLiveStreamUrl(trimmed)) return trimmed;
   try {
-    const parsed = new URL(trimmed);
+    const parsed = new URL(trimmed, window.location.origin);
     if (/\.(ts|m3u8|mp4|mkv|avi)(\?|#|$)/i.test(parsed.pathname)) {
-      return parsed.href;
+      return parsed.pathname + parsed.search;
     }
     if (/\/live\/[^/]+\/[^/]+\/[^/]+$/i.test(parsed.pathname)) {
       parsed.pathname = `${parsed.pathname}.ts`;
-      return parsed.href;
+      return parsed.pathname + parsed.search;
     }
-    return parsed.href;
+    return parsed.pathname + parsed.search;
   } catch {
     if (/\.(ts|m3u8)(\?|#|$)/i.test(trimmed)) return trimmed;
     return trimmed;
   }
 }
 
-/** URL absoluta do canal (.ts), sem passar pelo domínio da Vercel. */
+/** URL do canal (.ts) sob /api/ (mesma origem do webplayer). */
 function toAbsoluteLiveStreamUrl(originalUrl) {
   const withTs = ensureLiveTsUrl(originalUrl);
   try {
-    return new URL(withTs).href;
+    const parsed = new URL(withTs, window.location.origin);
+    return parsed.pathname + parsed.search;
   } catch {
-    const server = window.SlimFlixAuth?.getStoredSession?.()?.server;
-    if (server) return new URL(withTs, server.replace(/\/+$/, "/")).href;
-    return withTs;
+    const server =
+      window.SlimFlixAuth?.normalizeServerUrl?.(
+        window.SlimFlixAuth?.getStoredSession?.()?.server
+      ) || "/api";
+    try {
+      const parsed = new URL(withTs, `${window.location.origin}${server}/`);
+      return parsed.pathname + parsed.search;
+    } catch {
+      return withTs;
+    }
   }
 }
 
