@@ -1,72 +1,11 @@
-/*! SlimFlix BUILD: login-vps-8 — proxy Mixed Content (VPS/nginx path) */
-(function () {
-  if (window.__SlimFlixProxyInstalled) return;
-  window.__SlimFlixProxyInstalled = true;
-  const API = "/api";
-  const PROXY_BUILD = "login-vps-8-proxy";
-
-  function toProxyUrl(url) {
-    const raw = String(url || "").trim();
-    if (!raw) return raw;
-    if (raw.startsWith(`${API}/`) && !raw.startsWith(`${API}/proxy`)) return raw;
-    if (/^https?:\/\//i.test(raw)) {
-      try {
-        const p = new URL(raw);
-        return `${API}/${p.host}${p.pathname}${p.search}${p.hash}`;
-      } catch {
-        return raw;
-      }
-    }
-    return raw;
-  }
-
-  const nativeFetch = window.fetch.bind(window);
-  window.fetch = function (input, init) {
-    if (typeof input === "string") return nativeFetch(toProxyUrl(input), init);
-    if (input instanceof Request) {
-      const proxied = toProxyUrl(input.url);
-      if (proxied !== input.url) return nativeFetch(new Request(proxied, input), init);
-    }
-    return nativeFetch(input, init);
-  };
-
-  const xhrOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, url, async, user, password) {
-    return xhrOpen.call(this, method, toProxyUrl(url), async, user, password);
-  };
-
-  try {
-    const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src");
-    if (srcDesc?.set) {
-      Object.defineProperty(HTMLMediaElement.prototype, "src", {
-        configurable: true,
-        enumerable: srcDesc.enumerable,
-        get: srcDesc.get,
-        set(value) {
-          srcDesc.set.call(this, toProxyUrl(value));
-        },
-      });
-    }
-  } catch {
-    /* ignore */
-  }
-
-  window.SlimFlixApiProxyShim = {
-    BUILD: PROXY_BUILD,
-    toProxyUrl,
-    proxyMode: () => "path",
-  };
-  console.info("[SlimFlix]", PROXY_BUILD, "ativo — http:// → /api/{host}/");
-})();
-
 /**
  * SlimFlix — autenticação Xtream Codes API e navegação SPA (login ↔ player)
+ * Login e API Xtream passam pelo servidor Node (POST /api/login, POST /api/xtream).
  */
 (function () {
-  const SLIMFLIX_LOGIN_BUILD = "login-vps-8";
+  const SLIMFLIX_LOGIN_BUILD = "node-express-1";
   console.info("[SlimFlix] login.js build:", SLIMFLIX_LOGIN_BUILD);
 
-  /** Prefixo do proxy reverso local (evita Mixed Content). */
   const IPTV_API_BASE = "/api";
 
   /** Hosts dos painéis (failover). URLs de API/stream são sempre /api/{host}/… no navegador. */
@@ -301,35 +240,28 @@
 
   /** Garante URL relativa /api/… antes de fetch ou <video src> (evita Mixed Content). */
   function ensureProxiedUrl(targetUrl) {
-    let url = wrapUrlForProxy(targetUrl);
-    if (/^https?:\/\//i.test(url)) {
-      url = httpUrlToApiProxy(url);
+    const trimmed = String(targetUrl || "").trim();
+    if (!trimmed) return trimmed;
+    if (trimmed.startsWith(`${IPTV_API_BASE}/stream?url=`)) return trimmed;
+    if (/^https?:\/\//i.test(trimmed)) {
+      return `${IPTV_API_BASE}/stream?url=${encodeURIComponent(trimmed)}`;
     }
-    if (/^https?:\/\//i.test(url) && window.location.protocol === "https:") {
-      console.error("[SlimFlix] Bloqueio Mixed Content — URL ainda é HTTP absoluta:", url);
-      throw new TypeError(
-        "Mixed Content: requisição HTTP bloqueada em página HTTPS. Use o proxy /api/."
-      );
-    }
-    return url;
+    return trimmed;
   }
 
-  /** Base do painel no proxy: http://host → /api/host */
+  /** URL base do painel em HTTP (usada só no body para o servidor Node). */
   function normalizeServerUrl(raw) {
     const trimmed = (raw || "").trim();
     if (!trimmed) return "";
-    if (/^https?:\/\//i.test(trimmed)) {
-      try {
-        return `${IPTV_API_BASE}/${new URL(trimmed).host}`;
-      } catch {
-        return "";
-      }
-    }
     if (trimmed.startsWith(`${IPTV_API_BASE}/`)) {
       const match = trimmed.match(/^\/api\/([^/]+)/);
-      return match ? `${IPTV_API_BASE}/${match[1]}` : "";
+      return match ? `http://${match[1]}` : "";
     }
-    return trimmed;
+    if (/^https?:\/\//i.test(trimmed)) {
+      return trimmed.replace(/\/+$/, "");
+    }
+    const host = trimmed.split("/")[0];
+    return host ? `http://${host}` : "";
   }
 
   /** Alias: reescreve qualquer URL Xtream HTTP para o proxy /api/{host}/… */
@@ -518,18 +450,30 @@
   }
 
   /**
-   * Requisição genérica à Xtream API (usa credenciais do localStorage).
+   * Requisição genérica à Xtream API via servidor Node (POST /api/xtream).
    */
   async function xtreamFetch(action, extraParams = {}) {
     if (!hasActiveSession()) {
       throw new Error("Acesso negado. Faça login para continuar.");
     }
     const { username, password, server } = getStoredSession();
-    if (!server || !username || !password) {
+    const serverUrl = normalizeServerUrl(server);
+    if (!serverUrl || !username || !password) {
       throw new Error("Sessão Xtream não encontrada. Faça login novamente.");
     }
-    const url = buildPlayerApiUrl(username, password, action, extraParams, server);
-    const response = await fetchXtreamUrl(url);
+
+    const response = await fetch("/api/xtream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        serverUrl,
+        username,
+        password,
+        action,
+        extraParams,
+      }),
+    });
+
     if (!response.ok) {
       throw new Error(`Servidor respondeu com erro HTTP ${response.status}.`);
     }
@@ -537,7 +481,7 @@
   }
 
   /**
-   * Autenticação Xtream Codes API — tenta cada servidor em IPTV_SERVERS até auth válido.
+   * Login via API Node — sem fetch HTTP direto no navegador (evita Mixed Content).
    */
   async function authenticateXtream(credentials) {
     const { username, password } = credentials;
@@ -546,47 +490,50 @@
       return { ok: false, message: "Preencha usuário e senha." };
     }
 
-    if (!IPTV_SERVERS.length) {
+    if (!IPTV_UPSTREAM_HOSTS.length) {
       return {
         ok: false,
-        message: "Configure IPTV_SERVERS em login.js com as URLs dos painéis.",
+        message: "Configure IPTV_UPSTREAM_HOSTS em login.js.",
       };
     }
 
     for (const host of IPTV_UPSTREAM_HOSTS) {
-      const server = hostToApiBase(host);
-      if (!server) continue;
-
-      const url = buildPlayerApiUrl(username, password, undefined, {}, server);
+      const serverUrl = `http://${host}`;
 
       try {
-        const response = await fetchXtreamUrl(url);
-        if (!response.ok) continue;
+        const response = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password, serverUrl }),
+        });
 
-        const data = await response.json();
-        const userInfo = normalizeUserInfo(data);
+        const result = await response.json().catch(() => ({}));
 
         console.log("[SlimFlix Xtream] Tentativa de login:", {
           host,
-          proxyUrl: url,
+          serverUrl,
           username,
-          user_info: userInfo,
-          server_info: data?.server_info,
+          httpStatus: response.status,
+          ok: result.ok,
         });
 
+        if (!response.ok || !result.ok || !result.data) continue;
+
+        const userInfo = result.userInfo || normalizeUserInfo(result.data);
         if (!isXtreamAuthValid(userInfo)) continue;
 
-        saveXtreamSession(username, password, data, server);
-        console.info("[SlimFlix Xtream] Login OK via proxy:", server);
+        const panelBase = result.serverUrl || serverUrl;
+        saveXtreamSession(username, password, result.data, panelBase);
+        console.info("[SlimFlix Xtream] Login OK:", panelBase);
 
-        return { ok: true, userInfo, serverInfo: data?.server_info, server };
+        return {
+          ok: true,
+          userInfo,
+          serverInfo: result.serverInfo || result.data?.server_info,
+          server: panelBase,
+        };
       } catch (err) {
-        console.warn("[SlimFlix Xtream] Falha no login via proxy:", {
-          build: SLIMFLIX_LOGIN_BUILD,
-          proxyBase: server,
-          requestUrl: url,
-          err,
-        });
+        console.warn("[SlimFlix Xtream] Falha no login:", { host, serverUrl, err });
       }
     }
 

@@ -24,29 +24,28 @@
     return categoryMap.get(String(categoryId)) || fallbackPrefix || "Sem categoria";
   }
 
-  function streamApiBase(server) {
+  function panelHttpBase(server) {
     const normalize = global.SlimFlixAuth?.normalizeServerUrl;
-    if (normalize) return normalize(server);
-    const raw = (server || "").trim();
-    return raw.startsWith("/api") ? raw.replace(/\/+$/, "") : "/api";
+    const raw = normalize ? normalize(server) : String(server || "").trim();
+    if (/^https?:\/\//i.test(raw)) return raw.replace(/\/+$/, "");
+    if (raw) return `http://${raw.split("/")[0]}`;
+    return "http://localhost";
   }
 
-  /** URLs de stream via proxy nginx /api/. */
   function proxyStreamUrl(httpUrl) {
-    const rewrite = global.SlimFlixApiProxyShim?.toProxyUrl || global.SlimFlixAuth?.httpUrlToApiProxy;
-    return rewrite ? rewrite(httpUrl) : httpUrl;
+    return global.SlimFlixAuth?.ensureProxiedUrl?.(httpUrl) || httpUrl;
   }
 
   function buildLiveStreamUrl(server, username, password, streamId) {
-    const base = streamApiBase(server).replace(new RegExp(`^/api/`), "");
-    const httpUrl = `http://${base}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.ts`;
+    const base = panelHttpBase(server);
+    const httpUrl = `${base}/live/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.ts`;
     return proxyStreamUrl(httpUrl);
   }
 
   function buildVodStreamUrl(server, username, password, streamId, extension) {
     const ext = (extension || "mp4").replace(/^\./, "");
-    const base = streamApiBase(server).replace(new RegExp(`^/api/`), "");
-    const httpUrl = `http://${base}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.${ext}`;
+    const base = panelHttpBase(server);
+    const httpUrl = `${base}/movie/${encodeURIComponent(username)}/${encodeURIComponent(password)}/${streamId}.${ext}`;
     return proxyStreamUrl(httpUrl);
   }
 
@@ -140,7 +139,7 @@
 
   /** Catálogo fictício para desenvolvimento quando a API falha. */
   function getMockCatalogEntries(session) {
-    const server = session?.server || "/api";
+    const server = session?.server || "http://spacetg.shop";
     const user = session?.username || "demo";
     const pass = session?.password || "demo";
 
