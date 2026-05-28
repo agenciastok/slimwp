@@ -12,6 +12,45 @@ const ALLOWED_HOSTS = (process.env.ALLOWED_IPTV_HOSTS || "spacetg.shop,premiumcp
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);
 
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+/** Cabeçalhos para o painel Xtream aceitar streams (.ts / .m3u8). */
+function buildStreamUpstreamHeaders(req, targetUrl) {
+  const parsed = new URL(targetUrl);
+  const headers = {
+    "User-Agent": BROWSER_USER_AGENT,
+    Accept: "*/*",
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+    Connection: "keep-alive",
+    Referer: `${parsed.protocol}//${parsed.host}/`,
+  };
+
+  if (req.headers.range) headers.Range = req.headers.range;
+  if (req.headers["if-range"]) headers["If-Range"] = req.headers["if-range"];
+
+  return headers;
+}
+
+function forwardStreamResponseHeaders(upstream, res) {
+  const passthrough = [
+    "content-type",
+    "content-length",
+    "content-range",
+    "accept-ranges",
+    "cache-control",
+  ];
+
+  for (const name of passthrough) {
+    const value = upstream.headers.get(name);
+    if (value) res.setHeader(name, value);
+  }
+
+  res.setHeader("Cache-Control", "no-store, no-cache");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges");
+}
+
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -127,7 +166,7 @@ app.post("/api/xtream", async (req, res) => {
   }
 });
 
-/** Streams (.ts / .m3u8) — repassa binário do painel HTTP. */
+/** Streams (.ts / .m3u8) — pipe binário contínuo painel → cliente (mpegts.js). */
 app.get("/api/stream", async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl || typeof targetUrl !== "string") {
@@ -145,28 +184,47 @@ app.get("/api/stream", async (req, res) => {
     return res.status(403).json({ error: "Host not allowed" });
   }
 
+  const abortController = new AbortController();
+  req.on("close", () => {
+    if (!res.writableEnded) abortController.abort();
+  });
+
   try {
-    const upstream = await fetch(targetUrl, { method: "GET" });
+    const upstream = await fetch(targetUrl, {
+      method: "GET",
+      headers: buildStreamUpstreamHeaders(req, targetUrl),
+      redirect: "follow",
+      signal: abortController.signal,
+    });
+
     res.status(upstream.status);
-    const ct = upstream.headers.get("content-type");
-    if (ct) res.setHeader("Content-Type", ct);
-    const ar = upstream.headers.get("accept-ranges");
-    if (ar) res.setHeader("Accept-Ranges", ar);
-    const cr = upstream.headers.get("content-range");
-    if (cr) res.setHeader("Content-Range", cr);
-    const cl = upstream.headers.get("content-length");
-    if (cl) res.setHeader("Content-Length", cl);
+    forwardStreamResponseHeaders(upstream, res);
 
     if (!upstream.body) {
       res.end();
       return;
     }
 
-    await pipeline(Readable.fromWeb(upstream.body), res);
+    const nodeStream = Readable.fromWeb(upstream.body);
+
+    nodeStream.on("error", (err) => {
+      console.error("[SlimFlix /api/stream] pipe error:", err.message);
+      if (!res.headersSent) res.status(502);
+      if (!res.writableEnded) res.end();
+    });
+
+    res.on("close", () => {
+      nodeStream.destroy();
+    });
+
+    await pipeline(nodeStream, res);
   } catch (err) {
+    if (err.name === "AbortError") return;
     console.error("[SlimFlix /api/stream]", err);
     if (!res.headersSent) {
-      res.status(502).json({ error: "Upstream stream failed" });
+      res.status(502).json({ error: "Upstream stream failed", message: err.message });
+    } else if (!res.writableEnded) {
+      res.end();
     }
   }
 });
