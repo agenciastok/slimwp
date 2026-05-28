@@ -1,8 +1,69 @@
+/*! SlimFlix BUILD: login-vps-8 — proxy Mixed Content (VPS/nginx path) */
+(function () {
+  if (window.__SlimFlixProxyInstalled) return;
+  window.__SlimFlixProxyInstalled = true;
+  const API = "/api";
+  const PROXY_BUILD = "login-vps-8-proxy";
+
+  function toProxyUrl(url) {
+    const raw = String(url || "").trim();
+    if (!raw) return raw;
+    if (raw.startsWith(`${API}/`) && !raw.startsWith(`${API}/proxy`)) return raw;
+    if (/^https?:\/\//i.test(raw)) {
+      try {
+        const p = new URL(raw);
+        return `${API}/${p.host}${p.pathname}${p.search}${p.hash}`;
+      } catch {
+        return raw;
+      }
+    }
+    return raw;
+  }
+
+  const nativeFetch = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    if (typeof input === "string") return nativeFetch(toProxyUrl(input), init);
+    if (input instanceof Request) {
+      const proxied = toProxyUrl(input.url);
+      if (proxied !== input.url) return nativeFetch(new Request(proxied, input), init);
+    }
+    return nativeFetch(input, init);
+  };
+
+  const xhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url, async, user, password) {
+    return xhrOpen.call(this, method, toProxyUrl(url), async, user, password);
+  };
+
+  try {
+    const srcDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "src");
+    if (srcDesc?.set) {
+      Object.defineProperty(HTMLMediaElement.prototype, "src", {
+        configurable: true,
+        enumerable: srcDesc.enumerable,
+        get: srcDesc.get,
+        set(value) {
+          srcDesc.set.call(this, toProxyUrl(value));
+        },
+      });
+    }
+  } catch {
+    /* ignore */
+  }
+
+  window.SlimFlixApiProxyShim = {
+    BUILD: PROXY_BUILD,
+    toProxyUrl,
+    proxyMode: () => "path",
+  };
+  console.info("[SlimFlix]", PROXY_BUILD, "ativo — http:// → /api/{host}/");
+})();
+
 /**
  * SlimFlix — autenticação Xtream Codes API e navegação SPA (login ↔ player)
  */
 (function () {
-  const SLIMFLIX_LOGIN_BUILD = "login-vps-7";
+  const SLIMFLIX_LOGIN_BUILD = "login-vps-8";
   console.info("[SlimFlix] login.js build:", SLIMFLIX_LOGIN_BUILD);
 
   /** Prefixo do proxy reverso local (evita Mixed Content). */
