@@ -2,7 +2,6 @@ const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const { Readable } = require("node:stream");
-const { pipeline } = require("node:stream/promises");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -12,18 +11,13 @@ const ALLOWED_HOSTS = (process.env.ALLOWED_IPTV_HOSTS || "spacetg.shop,premiumcp
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);
 
-const BROWSER_USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+/** User-Agent estilo VLC — painéis Xtream costumam liberar streams para players IPTV. */
+const STREAM_USER_AGENT = "VLC/3.0.9 LibVLC/3.0.9";
 
-/** Cabeçalhos para o painel Xtream aceitar streams (.ts / .m3u8). */
-function buildStreamUpstreamHeaders(req, targetUrl) {
-  const parsed = new URL(targetUrl);
+function buildStreamUpstreamHeaders(req) {
   const headers = {
-    "User-Agent": BROWSER_USER_AGENT,
+    "User-Agent": STREAM_USER_AGENT,
     Accept: "*/*",
-    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-    Connection: "keep-alive",
-    Referer: `${parsed.protocol}//${parsed.host}/`,
   };
 
   if (req.headers.range) headers.Range = req.headers.range;
@@ -192,7 +186,7 @@ app.get("/api/stream", async (req, res) => {
   try {
     const upstream = await fetch(targetUrl, {
       method: "GET",
-      headers: buildStreamUpstreamHeaders(req, targetUrl),
+      headers: buildStreamUpstreamHeaders(req),
       redirect: "follow",
       signal: abortController.signal,
     });
@@ -200,24 +194,41 @@ app.get("/api/stream", async (req, res) => {
     res.status(upstream.status);
     forwardStreamResponseHeaders(upstream, res);
 
+    if (!upstream.ok) {
+      const errText = await upstream.text().catch(() => "");
+      console.warn("[SlimFlix /api/stream] upstream HTTP", upstream.status, parsed.hostname);
+      res.end(errText);
+      return;
+    }
+
     if (!upstream.body) {
       res.end();
       return;
     }
 
-    const nodeStream = Readable.fromWeb(upstream.body);
+    if (!upstream.headers.get("content-type")) {
+      res.setHeader("Content-Type", "video/mp2t");
+    }
 
-    nodeStream.on("error", (err) => {
-      console.error("[SlimFlix /api/stream] pipe error:", err.message);
-      if (!res.headersSent) res.status(502);
-      if (!res.writableEnded) res.end();
-    });
+    const nodeStream = Readable.fromWeb(upstream.body);
 
     res.on("close", () => {
       nodeStream.destroy();
     });
 
-    await pipeline(nodeStream, res);
+    await new Promise((resolve, reject) => {
+      const onError = (err) => {
+        console.error("[SlimFlix /api/stream] pipe error:", err.message);
+        nodeStream.destroy();
+        if (!res.writableEnded) res.destroy(err);
+        reject(err);
+      };
+
+      nodeStream.on("error", onError);
+      res.on("error", onError);
+      res.on("finish", resolve);
+      nodeStream.pipe(res);
+    });
   } catch (err) {
     if (err.name === "AbortError") return;
     console.error("[SlimFlix /api/stream]", err);
